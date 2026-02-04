@@ -46,13 +46,32 @@ A native macOS screen recorder built with SwiftUI and ScreenCaptureKit. Your rec
 
 All shortcuts work globally — even when the app is in the background.
 
-## Requirements
+## Install
+
+### Download (pre-built)
+
+1. Download the latest `.dmg` from [Releases](https://github.com/simarahitamtech/OpenCapture/releases)
+2. Open the `.dmg` and drag **OpenCapture** to your **Applications** folder
+3. Run this command in Terminal to clear the macOS quarantine flag:
+
+```bash
+xattr -cr /Applications/OpenCapture.app
+```
+
+4. Open OpenCapture from Applications
+
+> **Why step 3?** macOS Gatekeeper blocks apps that aren't signed with an Apple Developer certificate. This is standard for open source Mac apps distributed outside the App Store. The `xattr -cr` command removes the quarantine flag.
+
+### Requirements
 
 - macOS 13.0+ (Ventura or later)
-- Xcode 15+ (for building from source)
+- Apple Silicon (arm64) for the pre-built `.dmg`
+- Xcode 15+ (only if building from source)
 - No external dependencies
 
 ## Building from Source
+
+Building from source avoids the Gatekeeper issue entirely.
 
 ### Using Swift Package Manager
 
