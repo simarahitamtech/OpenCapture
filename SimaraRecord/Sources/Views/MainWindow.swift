@@ -1,0 +1,693 @@
+//
+//  MainWindow.swift
+//  OpenCapture
+//
+//  Main control panel UI
+//
+
+import SwiftUI
+import AppKit
+import AVFoundation
+
+struct MainWindow: View {
+    @StateObject private var recorder = ScreenRecorder()
+    @StateObject private var audioManager = AudioManager()
+    @StateObject private var regionSelector = RegionSelectorController()
+    @StateObject private var annotationController = AnnotationController()
+    @StateObject private var webcamManager = WebcamManager()
+    @StateObject private var hotkeyManager = HotkeyManager()
+
+    @State private var settings = RecordingSettings.default
+    @State private var showingFilePicker = false
+    @State private var showingError = false
+    @State private var errorMessage = ""
+    @State private var showingPermissionAlert = false
+    @State private var hasRequestedPermission = false
+    @State private var recordingOverlayWindow: RecordingOverlayWindow?
+    @State private var regionBorderWindow: RegionBorderWindow?
+    @State private var webcamPiPWindow: WebcamPiPWindow?
+    @StateObject private var overlayState = OverlayToggleState()
+
+    var body: some View {
+        VStack(spacing: 10) {
+            // Header
+            headerView
+
+            // Recording Area
+            settingsCard {
+                regionSelectionView
+            }
+
+            // Audio & Webcam side by side
+            HStack(alignment: .top, spacing: 10) {
+                settingsCard {
+                    audioSettingsView
+                }
+                settingsCard {
+                    webcamSettingsView
+                }
+            }
+
+            // Output & Quality combined
+            settingsCard {
+                outputAndQualityView
+            }
+
+            // Main Action Button
+            mainActionButton
+
+            // Keyboard Shortcuts hint
+            shortcutsHint
+        }
+        .padding(16)
+        .frame(width: 500)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Color(NSColor.windowBackgroundColor))
+        .alert("Error", isPresented: $showingError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage)
+        }
+        .alert("Screen Recording Permission Required", isPresented: $showingPermissionAlert) {
+            Button("Open Settings") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Please enable OpenCapture in System Settings > Privacy & Security > Screen & System Audio Recording, then click Start Recording again.\n\nIf it still doesn't work, quit and reopen the app.")
+        }
+        .onAppear {
+            updateDefaultOutputURL()
+            setupHotkeys()
+        }
+    }
+
+    // MARK: - Settings Card Container
+
+    @ViewBuilder
+    private func settingsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(10)
+    }
+
+    // MARK: - Header
+
+    private var headerView: some View {
+        HStack(spacing: 10) {
+            // App icon — camera on gradient circle
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.58, green: 0.44, blue: 0.86),
+                                Color(red: 0.50, green: 0.62, blue: 0.85),
+                                Color(red: 0.55, green: 0.78, blue: 0.78)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 36, height: 36)
+
+                Image(systemName: "video.fill")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white)
+
+                Circle()
+                    .fill(Color.red.opacity(0.9))
+                    .frame(width: 6, height: 6)
+                    .offset(x: 8, y: -7)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("OpenCapture")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundColor(.primary)
+
+                Text("Open source screen recording for Mac")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+        }
+    }
+
+    // MARK: - Region Selection
+
+    private var regionSelectionView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Recording Area", systemImage: "viewfinder")
+                .font(.system(size: 13, weight: .semibold))
+
+            HStack(spacing: 10) {
+                // Full Screen card
+                regionCard(
+                    icon: "rectangle.inset.filled",
+                    title: "Full Screen",
+                    subtitle: "Entire display",
+                    isSelected: settings.region == .fullScreen
+                ) {
+                    settings.region = .fullScreen
+                }
+                .disabled(recorder.state.isRecording)
+
+                // Select Region card
+                regionCard(
+                    icon: "viewfinder",
+                    title: "Select Region",
+                    subtitle: regionSubtitle,
+                    isSelected: settings.region != .fullScreen
+                ) {
+                    selectRegion()
+                }
+                .disabled(recorder.state.isRecording)
+            }
+        }
+    }
+
+    private var regionSubtitle: String {
+        if case .custom(let rect) = settings.region {
+            return "\(Int(rect.width)) × \(Int(rect.height))"
+        }
+        return "Click to select"
+    }
+
+    private var micGainIcon: String {
+        let gain = settings.audioSettings.micInputGain
+        if gain == 0 { return "speaker.slash" }
+        if gain < 0.33 { return "speaker.wave.1" }
+        if gain < 0.66 { return "speaker.wave.2" }
+        return "speaker.wave.3"
+    }
+
+    private var audioLevelColor: Color {
+        let level = audioManager.audioLevel
+        if level > 0.8 { return .red }
+        if level > 0.5 { return .orange }
+        return .green
+    }
+
+    private func regionCard(icon: String, title: String, subtitle: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundColor(isSelected ? .accentColor : .secondary)
+
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(isSelected ? .primary : .secondary)
+
+                Text(subtitle)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isSelected ? Color.accentColor.opacity(0.08) : Color(NSColor.controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isSelected ? Color.accentColor : Color(NSColor.separatorColor).opacity(0.5), lineWidth: isSelected ? 1.5 : 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Audio Settings
+
+    private var audioSettingsView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Audio", systemImage: "waveform")
+                .font(.system(size: 13, weight: .semibold))
+
+            Toggle("Microphone", isOn: $settings.audioSettings.microphoneEnabled)
+                .font(.system(size: 12))
+                .disabled(recorder.state.isRecording)
+                .onChange(of: settings.audioSettings.microphoneEnabled) { newValue in
+                    if newValue {
+                        Task {
+                            let granted = await audioManager.requestMicrophonePermission()
+                            if !granted {
+                                settings.audioSettings.microphoneEnabled = false
+                                showError("Microphone permission denied. Please enable it in System Settings.")
+                            }
+                        }
+                    }
+                }
+
+            if settings.audioSettings.microphoneEnabled && !audioManager.availableMicrophones.isEmpty {
+                Picker("Device", selection: $audioManager.selectedMicrophone) {
+                    ForEach(audioManager.availableMicrophones) { device in
+                        Text(device.displayName).tag(device as AudioDevice?)
+                    }
+                }
+                .font(.system(size: 11))
+                .disabled(recorder.state.isRecording)
+
+                VStack(spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: micGainIcon)
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .frame(width: 14)
+
+                        Slider(value: $settings.audioSettings.micInputGain, in: 0...1)
+                            .controlSize(.small)
+                            .onChange(of: settings.audioSettings.micInputGain) { newValue in
+                                recorder.updateMicGain(newValue)
+                            }
+
+                        Text("\(Int(settings.audioSettings.micInputGain * 100))%")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 32, alignment: .trailing)
+                    }
+
+                    // Level meter
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(Color(NSColor.separatorColor).opacity(0.3))
+                                .frame(height: 3)
+
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(audioLevelColor)
+                                .frame(width: geo.size.width * CGFloat(audioManager.audioLevel), height: 3)
+                        }
+                    }
+                    .frame(height: 3)
+                }
+            }
+
+            Toggle("System Audio", isOn: $settings.audioSettings.systemAudioEnabled)
+                .font(.system(size: 12))
+                .disabled(recorder.state.isRecording)
+        }
+    }
+
+    // MARK: - Webcam Settings
+
+    private var webcamSettingsView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Webcam", systemImage: "camera")
+                .font(.system(size: 13, weight: .semibold))
+
+            Toggle("Show overlay", isOn: $settings.webcamSettings.enabled)
+                .font(.system(size: 12))
+                .disabled(recorder.state.isRecording)
+                .onChange(of: settings.webcamSettings.enabled) { newValue in
+                    if newValue {
+                        Task {
+                            let granted = await webcamManager.requestCameraPermission()
+                            if !granted {
+                                settings.webcamSettings.enabled = false
+                                showError("Camera permission denied. Please enable it in System Settings.")
+                            }
+                        }
+                    }
+                }
+
+            if settings.webcamSettings.enabled && !webcamManager.availableCameras.isEmpty {
+                Picker("Camera", selection: $webcamManager.selectedCamera) {
+                    ForEach(webcamManager.availableCameras) { camera in
+                        Text(camera.displayName).tag(camera as CameraDevice?)
+                    }
+                }
+                .font(.system(size: 11))
+                .disabled(recorder.state.isRecording)
+            }
+        }
+    }
+
+    // MARK: - Output & Quality (combined)
+
+    private var outputAndQualityView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Output", systemImage: "folder")
+                .font(.system(size: 13, weight: .semibold))
+
+            HStack(spacing: 8) {
+                Image(systemName: "doc")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+
+                Text(settings.outputURL.deletingLastPathComponent().lastPathComponent + "/" + settings.outputURL.lastPathComponent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Button("Change") {
+                    chooseOutputLocation()
+                }
+                .font(.system(size: 10))
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .disabled(recorder.state.isRecording)
+            }
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Picker("Quality", selection: $settings.quality) {
+                    ForEach(VideoQuality.allCases) { quality in
+                        Text(quality.rawValue).tag(quality)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(recorder.state.isRecording)
+
+                Picker("FPS", selection: $settings.frameRate) {
+                    ForEach(FrameRate.allCases) { fps in
+                        Text(fps.displayName).tag(fps)
+                    }
+                }
+                .frame(width: 100)
+                .disabled(recorder.state.isRecording)
+            }
+        }
+    }
+
+    // MARK: - Main Action Button
+
+    private var mainActionButton: some View {
+        Group {
+            if recorder.state.isRecording {
+                Button(action: stopRecording) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 14))
+                        Text("Stop Recording")
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.large)
+            } else {
+                Button(action: startRecording) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 12, height: 12)
+                        Text("Start Recording")
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+        }
+    }
+
+    // MARK: - Shortcuts Hint
+
+    private var shortcutsHint: some View {
+        HStack(spacing: 12) {
+            shortcutLabel("R", "Start/Stop", shortcut: "\u{21E7}\u{2318}R")
+            shortcutLabel("P", "Pause", shortcut: "\u{21E7}\u{2318}P")
+            shortcutLabel("A", "Annotate", shortcut: "\u{21E7}\u{2318}A")
+            shortcutLabel("D", "Clear", shortcut: "\u{21E7}\u{2318}D")
+            shortcutLabel("V", "Webcam", shortcut: "\u{21E7}\u{2318}V")
+            shortcutLabel("M", "Mic", shortcut: "\u{21E7}\u{2318}M")
+            shortcutLabel("\u{238B}", "Cancel", shortcut: "Esc")
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func shortcutLabel(_ icon: String, _ label: String, shortcut: String) -> some View {
+        VStack(spacing: 2) {
+            Text(shortcut)
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(3)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5)
+                )
+            Text(label)
+                .font(.system(size: 8))
+                .foregroundColor(Color(NSColor.tertiaryLabelColor))
+        }
+    }
+
+    // MARK: - Actions
+
+    private func selectRegion() {
+        regionSelector.showSelector { rect in
+            if let rect = rect {
+                settings.region = .custom(rect)
+            }
+        }
+    }
+
+    private func chooseOutputLocation() {
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.quickTimeMovie]
+        savePanel.nameFieldStringValue = "recording_\(DateFormatter.filenameDateFormatter.string(from: Date())).mov"
+        savePanel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+
+        savePanel.begin { response in
+            if response == .OK, let url = savePanel.url {
+                settings.outputURL = url
+            }
+        }
+    }
+
+    private func startRecording() {
+        Task {
+            do {
+                // Check screen recording permission BEFORE countdown
+                // by actually trying SCShareableContent. CGPreflight is unreliable
+                // (can return false even when permission is granted).
+                let hasPermission = await recorder.checkPermission()
+                if !hasPermission {
+                    if !hasRequestedPermission {
+                        // First time — trigger the macOS system dialog.
+                        CGRequestScreenCaptureAccess()
+                        hasRequestedPermission = true
+                    } else {
+                        // Already triggered system dialog before.
+                        showingPermissionAlert = true
+                    }
+                    return
+                }
+
+                // Update output URL with current timestamp
+                updateDefaultOutputURL()
+
+                // Cinematic countdown: 3... 2... 1...
+                let countdown = CountdownController()
+                await countdown.runCountdown()
+
+                try await recorder.startRecording(settings: settings)
+
+                // Show recording overlay
+                showRecordingOverlay()
+
+                // Show region border if recording a custom region
+                if case .custom(let rect) = settings.region {
+                    let border = RegionBorderWindow(region: rect)
+                    border.orderFront(nil)
+                    regionBorderWindow = border
+                }
+
+                // Start webcam PiP if enabled
+                if settings.webcamSettings.enabled {
+                    let granted = await webcamManager.requestCameraPermission()
+                    if granted {
+                        if let previewLayer = webcamManager.startCapture(deviceID: webcamManager.selectedCamera?.id) {
+                            showWebcamPiP(previewLayer: previewLayer)
+                        }
+                    }
+                }
+
+            } catch RecorderError.permissionRequired {
+                showingPermissionAlert = true
+            } catch {
+                let errorDesc = error.localizedDescription
+                if errorDesc.contains("TCC") || errorDesc.contains("declined") || errorDesc.contains("denied") {
+                    showingPermissionAlert = true
+                } else {
+                    showError(errorDesc)
+                }
+            }
+        }
+    }
+
+    private func stopRecording() {
+        Task {
+            do {
+                // Cancel any active annotation
+                annotationController.cancel()
+
+                try await recorder.stopRecording()
+
+                // Hide recording overlay
+                hideRecordingOverlay()
+
+                // Show file in Finder
+                NSWorkspace.shared.activateFileViewerSelecting([settings.outputURL])
+
+            } catch {
+                showError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func showRecordingOverlay() {
+        // Set initial toggle state
+        overlayState.micEnabled = settings.audioSettings.microphoneEnabled
+        overlayState.webcamEnabled = settings.webcamSettings.enabled
+
+        let window = RecordingOverlayWindow()
+        let overlay = RecordingOverlay(
+            recorder: recorder,
+            toggleState: overlayState,
+            onPause: { recorder.togglePause() },
+            onAnnotate: { annotationController.startAnnotating() },
+            onToggleWebcam: { [self] in toggleWebcamDuringRecording() },
+            onToggleMic: { [self] in toggleMicDuringRecording() },
+            onStop: stopRecording
+        )
+        window.contentView = NSHostingView(rootView: overlay)
+        window.orderFront(nil)
+        recordingOverlayWindow = window
+    }
+
+    private func toggleWebcamDuringRecording() {
+        if webcamPiPWindow != nil {
+            webcamManager.stopCapture()
+            webcamPiPWindow?.close()
+            webcamPiPWindow = nil
+            overlayState.webcamEnabled = false
+        } else {
+            Task {
+                let granted = await webcamManager.requestCameraPermission()
+                if granted {
+                    if let previewLayer = webcamManager.startCapture(deviceID: webcamManager.selectedCamera?.id) {
+                        showWebcamPiP(previewLayer: previewLayer)
+                        overlayState.webcamEnabled = true
+                    }
+                }
+            }
+        }
+    }
+
+    private func toggleMicDuringRecording() {
+        if overlayState.micEnabled {
+            recorder.muteMicrophone()
+            overlayState.micEnabled = false
+        } else {
+            recorder.unmuteMicrophone()
+            overlayState.micEnabled = true
+        }
+    }
+
+    private func hideRecordingOverlay() {
+        annotationController.cancel()
+        recordingOverlayWindow?.close()
+        recordingOverlayWindow = nil
+        regionBorderWindow?.close()
+        regionBorderWindow = nil
+
+        // Stop webcam
+        webcamManager.stopCapture()
+        webcamPiPWindow?.close()
+        webcamPiPWindow = nil
+    }
+
+    private func showWebcamPiP(previewLayer: AVCaptureVideoPreviewLayer) {
+        let window = WebcamPiPWindow()
+        let view = WebcamPiPView(previewLayer: previewLayer)
+        window.contentView = view
+        window.orderFront(nil)
+        webcamPiPWindow = window
+    }
+
+    private func updateDefaultOutputURL() {
+        let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
+        let timestamp = DateFormatter.filenameDateFormatter.string(from: Date())
+        let filename = "recording_\(timestamp).mov"
+        settings.outputURL = desktopURL.appendingPathComponent(filename)
+    }
+
+    private func showError(_ message: String) {
+        errorMessage = message
+        showingError = true
+    }
+
+    // MARK: - Hotkeys
+
+    private func setupHotkeys() {
+        hotkeyManager.onAction = { [self] action in
+            switch action {
+            case .toggleRecording:
+                if recorder.state.isRecording {
+                    stopRecording()
+                } else if recorder.state == .idle {
+                    startRecording()
+                }
+            case .togglePause:
+                if recorder.state.isRecording {
+                    recorder.togglePause()
+                }
+            case .cancelRecording:
+                if recorder.state.isRecording {
+                    Task {
+                        await recorder.cancelRecording()
+                        hideRecordingOverlay()
+                    }
+                }
+            case .toggleAnnotation:
+                if recorder.state.isRecording {
+                    if annotationController.isActive {
+                        annotationController.stopAnnotating()
+                    } else {
+                        annotationController.startAnnotating()
+                    }
+                }
+            case .clearAnnotations:
+                if recorder.state.isRecording {
+                    annotationController.clearAnnotations()
+                }
+            case .toggleWebcam:
+                if recorder.state.isRecording {
+                    toggleWebcamDuringRecording()
+                }
+            case .toggleMicrophone:
+                if recorder.state.isRecording {
+                    toggleMicDuringRecording()
+                }
+            }
+        }
+        hotkeyManager.start()
+    }
+}
+
+// MARK: - Preview
+
+#Preview {
+    MainWindow()
+}

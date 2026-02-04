@@ -1,0 +1,68 @@
+# Xcode
+*.xcodeproj
+*.xcworkspace
+!default.xcworkspace
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Build artifacts
+*.app
+*.dSYM.zip
+*.dSYM
+
+# Test recordings
+*.mp4
+*.mov
+
+# IDE
+.vscode/
+.idea/
+
+# Dependencies
+Carthage/
+Pods/
+
+# Claude AI
+.claude/
+
+# Development scripts
+build_app.sh
+check_permissions.sh
+cleanup_permissions.sh
+quick_cleanup.sh
+run_with_logs.sh
+
+# Development docs (internal only)
+BUILD_COMPLETE.md
+BUILD_GUIDE.md
+CURRENT_STATUS.md
+FINAL_FIX.md
+FRESH_INSTALL.md
+LAUNCH_CHECKLIST.md
+MANUAL_TCC_CLEANUP.md
+PROJECT_STRUCTURE.md
+PROJECT_SUMMARY.md
+RECORDING_TEST.md
