@@ -13,6 +13,8 @@ import AppKit
 class OverlayToggleState: ObservableObject {
     @Published var micEnabled: Bool = false
     @Published var webcamEnabled: Bool = false
+    @Published var teleprompterEnabled: Bool = false
+    @Published var backgroundBlurEnabled: Bool = false
 }
 
 // MARK: - Recording Overlay (timer + stop button)
@@ -24,6 +26,8 @@ struct RecordingOverlay: View {
     let onAnnotate: () -> Void
     let onToggleWebcam: (() -> Void)?
     let onToggleMic: (() -> Void)?
+    let onToggleTeleprompter: (() -> Void)?
+    let onToggleBackgroundBlur: (() -> Void)?
     let onStop: () -> Void
 
     @State private var elapsedTime: TimeInterval = 0
@@ -40,6 +44,7 @@ struct RecordingOverlay: View {
                     .fill(recorder.state.isPaused ? Color.yellow : Color.red)
                     .frame(width: 12, height: 12)
                     .opacity(recorder.state.isPaused ? 1.0 : (isBlinking ? 0.3 : 1.0))
+                    .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isBlinking)
 
                 Text(formatTime(elapsedTime))
                     .font(.system(.title3, design: .monospaced))
@@ -65,6 +70,19 @@ struct RecordingOverlay: View {
                     systemName: toggleState.webcamEnabled ? "video.fill" : "video.slash.fill",
                     isOn: toggleState.webcamEnabled,
                     action: onToggleWebcam
+                )
+
+                Button(action: { onToggleBackgroundBlur?() }) {
+                    Image(systemName: "person.fill.viewfinder")
+                        .font(.system(size: 12))
+                        .foregroundColor(toggleState.backgroundBlurEnabled ? .green : .secondary.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+
+                statusIcon(
+                    systemName: toggleState.teleprompterEnabled ? "text.below.photo.fill" : "text.below.photo",
+                    isOn: toggleState.teleprompterEnabled,
+                    action: onToggleTeleprompter
                 )
             }
 
@@ -99,26 +117,21 @@ struct RecordingOverlay: View {
         .shadow(radius: 10)
         .onAppear {
             startTimer()
-            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                isBlinking = true
-            }
+            isBlinking = true
         }
         .onDisappear {
             stopTimer()
         }
     }
 
-    @ViewBuilder
     private func statusIcon(systemName: String, isOn: Bool, action: (() -> Void)?) -> some View {
-        if let action = action {
-            Button(action: action) {
-                Image(systemName: systemName)
-                    .font(.system(size: 12))
-                    .foregroundColor(isOn ? .green : .secondary.opacity(0.5))
-            }
-            .buttonStyle(.plain)
-            .help(isOn ? "On" : "Off")
+        Button(action: { action?() }) {
+            Image(systemName: systemName)
+                .font(.system(size: 12))
+                .foregroundColor(isOn ? .green : .secondary.opacity(0.5))
         }
+        .buttonStyle(.plain)
+        .help(isOn ? "On" : "Off")
     }
 
     private func startTimer() {
@@ -172,7 +185,7 @@ struct RecordingOverlay: View {
 class RecordingOverlayWindow: NSPanel {
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 370, height: 120),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 120),
             styleMask: [.nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false

@@ -7,17 +7,30 @@
 
 import AVFoundation
 import AppKit
+import Vision
+import CoreImage
 
 @MainActor
 class WebcamManager: ObservableObject {
     @Published var availableCameras: [CameraDevice] = []
     @Published var selectedCamera: CameraDevice?
     @Published var isRunning = false
+    @Published var backgroundBlurEnabled = false
 
     private var captureSession: AVCaptureSession?
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var deviceConnectedObserver: NSObjectProtocol?
     private var deviceDisconnectedObserver: NSObjectProtocol?
+
+    // Background blur pipeline
+    private var videoDataOutput: AVCaptureVideoDataOutput?
+    private var blurProcessor: BackgroundBlurProcessor?
+    private var delegateAdapter: VideoOutputDelegateAdapter?
+    private let videoOutputQueue = DispatchQueue(
+        label: "com.opencapture.webcamVideoOutput",
+        qos: .userInteractive
+    )
+    private(set) var processedFrameLayer: CALayer?
 
     init() {
         updateAvailableCameras()
@@ -111,6 +124,17 @@ class WebcamManager: ObservableObject {
             }
             session.addInput(input)
 
+            // Add video data output for background blur (no delegate until blur is enabled)
+            let dataOutput = AVCaptureVideoDataOutput()
+            dataOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            dataOutput.alwaysDiscardsLateVideoFrames = true
+            if session.canAddOutput(dataOutput) {
+                session.addOutput(dataOutput)
+                self.videoDataOutput = dataOutput
+            }
+
             session.commitConfiguration()
             session.startRunning()
 
@@ -121,11 +145,22 @@ class WebcamManager: ObservableObject {
             if device.position == .front || device.position == .unspecified {
                 layer.connection?.automaticallyAdjustsVideoMirroring = false
                 layer.connection?.isVideoMirrored = true
+
+                // Also mirror the video data output connection
+                if let dataConnection = dataOutput.connection(with: .video) {
+                    dataConnection.automaticallyAdjustsVideoMirroring = false
+                    dataConnection.isVideoMirrored = true
+                }
             }
 
             self.captureSession = session
             self.previewLayer = layer
             self.isRunning = true
+
+            // Create processed frame layer for blur mode
+            let procLayer = CALayer()
+            procLayer.contentsGravity = .resizeAspectFill
+            self.processedFrameLayer = procLayer
 
             print("📷 Webcam capture started: \(device.localizedName)")
             return layer
@@ -136,11 +171,71 @@ class WebcamManager: ObservableObject {
     }
 
     func stopCapture() {
+        disableBackgroundBlur()
         captureSession?.stopRunning()
         captureSession = nil
         previewLayer = nil
+        videoDataOutput = nil
+        processedFrameLayer = nil
         isRunning = false
         print("📷 Webcam capture stopped")
+    }
+
+    // MARK: - Background Blur
+
+    func updateBlurIntensity(_ intensity: Double) {
+        // Map 0.0–1.0 to sigma 5–30
+        let sigma = 5.0 + intensity * 25.0
+        blurProcessor?.blurSigma = sigma
+    }
+
+    func enableBackgroundBlur(intensity: Double = 0.7) {
+        print("🔵 enableBackgroundBlur called — isRunning: \(isRunning), dataOutput: \(videoDataOutput != nil), procLayer: \(processedFrameLayer != nil)")
+        guard isRunning, let dataOutput = videoDataOutput else {
+            print("🔴 enableBackgroundBlur BAILED — missing dataOutput or not running")
+            return
+        }
+
+        let processor = BackgroundBlurProcessor()
+        processor.blurSigma = 5.0 + intensity * 25.0
+        processor.onProcessedFrame = { [weak self] cgImage in
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self?.processedFrameLayer?.contents = cgImage
+            CATransaction.commit()
+        }
+        self.blurProcessor = processor
+
+        let adapter = VideoOutputDelegateAdapter(processor: processor)
+        self.delegateAdapter = adapter
+        dataOutput.setSampleBufferDelegate(adapter, queue: videoOutputQueue)
+
+        backgroundBlurEnabled = true
+        print("🔵 enableBackgroundBlur SUCCESS — blur is now ON")
+    }
+
+    func disableBackgroundBlur() {
+        print("🔵 disableBackgroundBlur called")
+        videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
+        blurProcessor?.stop()
+        blurProcessor = nil
+        delegateAdapter = nil
+
+        backgroundBlurEnabled = false
+
+        // Ensure the capture session is still running for the preview layer
+        if let session = captureSession, !session.isRunning {
+            session.startRunning()
+        }
+        print("🔵 disableBackgroundBlur DONE — blur is now OFF, session running: \(captureSession?.isRunning ?? false)")
+    }
+
+    func toggleBackgroundBlur(intensity: Double = 0.7) {
+        if backgroundBlurEnabled {
+            disableBackgroundBlur()
+        } else {
+            enableBackgroundBlur(intensity: intensity)
+        }
     }
 
     // MARK: - Permissions
@@ -162,6 +257,27 @@ class WebcamManager: ObservableObject {
         #else
         return false
         #endif
+    }
+}
+
+// MARK: - Video Output Delegate Adapter
+
+/// Bridges @MainActor WebcamManager to AVCaptureVideoDataOutputSampleBufferDelegate
+/// which delivers callbacks on arbitrary queues.
+class VideoOutputDelegateAdapter: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    private let processor: BackgroundBlurProcessor
+
+    init(processor: BackgroundBlurProcessor) {
+        self.processor = processor
+        super.init()
+    }
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        processor.processFrame(sampleBuffer)
     }
 }
 

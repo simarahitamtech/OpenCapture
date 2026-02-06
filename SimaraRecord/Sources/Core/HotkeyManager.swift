@@ -18,9 +18,17 @@ class HotkeyManager: ObservableObject {
         case clearAnnotations
         case toggleWebcam
         case toggleMicrophone
+        case toggleTeleprompter
+        case teleprompterNext
+        case teleprompterPrevious
+        case toggleBackgroundBlur
     }
 
     var onAction: ((Action) -> Void)?
+
+    /// Set to true when the teleprompter is visible, so arrow keys are captured for page navigation.
+    /// When false, arrow keys pass through to other apps (e.g. Keynote/PowerPoint slide navigation).
+    var teleprompterActive: Bool = false
 
     private var globalMonitor: Any?
     private var localMonitor: Any?
@@ -104,6 +112,30 @@ class HotkeyManager: ObservableObject {
         // Cmd+Shift+M — Toggle microphone
         if flags == [.command, .shift] && event.keyCode == 46 { // keyCode 46 = 'M'
             onAction?(.toggleMicrophone)
+            return
+        }
+
+        // Cmd+Shift+T — Toggle teleprompter
+        if flags == [.command, .shift] && event.keyCode == 17 { // keyCode 17 = 'T'
+            onAction?(.toggleTeleprompter)
+            return
+        }
+
+        // Cmd+Shift+B — Toggle background blur
+        if flags == [.command, .shift] && event.keyCode == 11 { // keyCode 11 = 'B'
+            onAction?(.toggleBackgroundBlur)
+            return
+        }
+
+        // Ctrl+Right arrow — Teleprompter next page (only when teleprompter is active)
+        if teleprompterActive && flags == [.control] && event.keyCode == 124 { // keyCode 124 = →
+            onAction?(.teleprompterNext)
+            return
+        }
+
+        // Ctrl+Left arrow — Teleprompter previous page (only when teleprompter is active)
+        if teleprompterActive && flags == [.control] && event.keyCode == 123 { // keyCode 123 = ←
+            onAction?(.teleprompterPrevious)
             return
         }
 

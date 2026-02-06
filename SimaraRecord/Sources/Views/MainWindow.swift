@@ -16,6 +16,7 @@ struct MainWindow: View {
     @StateObject private var annotationController = AnnotationController()
     @StateObject private var webcamManager = WebcamManager()
     @StateObject private var hotkeyManager = HotkeyManager()
+    @StateObject private var teleprompterState = TeleprompterState()
 
     @State private var settings = RecordingSettings.default
     @State private var showingFilePicker = false
@@ -26,6 +27,10 @@ struct MainWindow: View {
     @State private var recordingOverlayWindow: RecordingOverlayWindow?
     @State private var regionBorderWindow: RegionBorderWindow?
     @State private var webcamPiPWindow: WebcamPiPWindow?
+    @State private var webcamPiPView: WebcamPiPView?
+    @State private var teleprompterWindow: TeleprompterWindow?
+    @State private var scriptEditorWindow: NSWindow?
+    @State private var webcamPreviewWindow: NSWindow?
     @StateObject private var overlayState = OverlayToggleState()
 
     var body: some View {
@@ -46,6 +51,11 @@ struct MainWindow: View {
                 settingsCard {
                     webcamSettingsView
                 }
+            }
+
+            // Teleprompter
+            settingsCard {
+                teleprompterSettingsView
             }
 
             // Output & Quality combined
@@ -327,6 +337,104 @@ struct MainWindow: View {
                 }
                 .font(.system(size: 11))
                 .disabled(recorder.state.isRecording)
+
+                Toggle("Background blur", isOn: $settings.webcamSettings.backgroundBlurEnabled)
+                    .font(.system(size: 12))
+
+                if settings.webcamSettings.backgroundBlurEnabled {
+                    HStack(spacing: 6) {
+                        Image(systemName: "aqi.low")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+
+                        Slider(value: $settings.webcamSettings.blurIntensity, in: 0...1)
+                            .controlSize(.small)
+                            .onChange(of: settings.webcamSettings.blurIntensity) { newValue in
+                                webcamManager.updateBlurIntensity(newValue)
+                            }
+
+                        Image(systemName: "aqi.high")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+
+                        Text("\(Int(settings.webcamSettings.blurIntensity * 100))%")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 32, alignment: .trailing)
+                    }
+                }
+
+                Button(action: { showWebcamPreview() }) {
+                    Label("Preview Webcam", systemImage: "eye")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(recorder.state.isRecording)
+            }
+        }
+    }
+
+    // MARK: - Teleprompter Settings
+
+    private var teleprompterSettingsView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Teleprompter", systemImage: "text.below.photo")
+                .font(.system(size: 13, weight: .semibold))
+
+            Toggle("Enable teleprompter", isOn: $settings.teleprompterSettings.enabled)
+                .font(.system(size: 12))
+                .disabled(recorder.state.isRecording)
+
+            if settings.teleprompterSettings.enabled {
+                // Script preview + Edit button
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if settings.teleprompterSettings.scriptText.isEmpty {
+                            Text("No script — click Edit Script to add one")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .italic()
+                        } else {
+                            Text(settings.teleprompterSettings.scriptText.prefix(100) + (settings.teleprompterSettings.scriptText.count > 100 ? "..." : ""))
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
+
+                            let pageCount = settings.teleprompterSettings.scriptText.replacingOccurrences(of: "\n---\n", with: "\n###\n").components(separatedBy: "\n###\n").filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+                            let wordCount = settings.teleprompterSettings.scriptText.split(separator: " ").count
+                            Text("\(pageCount) page\(pageCount == 1 ? "" : "s"), \(wordCount) words")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
+                    }
+                    Spacer()
+                    Button("Edit Script") {
+                        openScriptEditor()
+                    }
+                    .font(.system(size: 11))
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(recorder.state.isRecording)
+                }
+
+                HStack(spacing: 8) {
+                    Text("Font size")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+
+                    Slider(value: $settings.teleprompterSettings.fontSize, in: 16...48, step: 2)
+                        .controlSize(.small)
+
+                    Text("\(Int(settings.teleprompterSettings.fontSize))pt")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(width: 30)
+                }
+
+                Text("### page break  •  *bold*  •  - bullet  •  ← → navigate")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -428,6 +536,8 @@ struct MainWindow: View {
             shortcutLabel("D", "Clear", shortcut: "\u{21E7}\u{2318}D")
             shortcutLabel("V", "Webcam", shortcut: "\u{21E7}\u{2318}V")
             shortcutLabel("M", "Mic", shortcut: "\u{21E7}\u{2318}M")
+            shortcutLabel("T", "Prompt", shortcut: "\u{21E7}\u{2318}T")
+            shortcutLabel("B", "Blur", shortcut: "\u{21E7}\u{2318}B")
             shortcutLabel("\u{238B}", "Cancel", shortcut: "Esc")
         }
         .frame(maxWidth: .infinity)
@@ -475,6 +585,30 @@ struct MainWindow: View {
         }
     }
 
+    private func openScriptEditor() {
+        // If already open, bring to front
+        if let existing = scriptEditorWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let editorView = ScriptEditorView(scriptText: $settings.teleprompterSettings.scriptText)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Teleprompter Script"
+        window.contentView = NSHostingView(rootView: editorView)
+        window.center()
+        window.minSize = NSSize(width: 400, height: 300)
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        scriptEditorWindow = window
+    }
+
     private func startRecording() {
         Task {
             do {
@@ -511,6 +645,12 @@ struct MainWindow: View {
                     let border = RegionBorderWindow(region: rect)
                     border.orderFront(nil)
                     regionBorderWindow = border
+                }
+
+                // Start teleprompter if enabled
+                if settings.teleprompterSettings.enabled {
+                    showTeleprompter()
+                    overlayState.teleprompterEnabled = true
                 }
 
                 // Start webcam PiP if enabled
@@ -560,6 +700,8 @@ struct MainWindow: View {
         // Set initial toggle state
         overlayState.micEnabled = settings.audioSettings.microphoneEnabled
         overlayState.webcamEnabled = settings.webcamSettings.enabled
+        overlayState.teleprompterEnabled = settings.teleprompterSettings.enabled
+        overlayState.backgroundBlurEnabled = settings.webcamSettings.backgroundBlurEnabled
 
         let window = RecordingOverlayWindow()
         let overlay = RecordingOverlay(
@@ -569,6 +711,8 @@ struct MainWindow: View {
             onAnnotate: { annotationController.startAnnotating() },
             onToggleWebcam: { [self] in toggleWebcamDuringRecording() },
             onToggleMic: { [self] in toggleMicDuringRecording() },
+            onToggleTeleprompter: { [self] in toggleTeleprompter() },
+            onToggleBackgroundBlur: { [self] in toggleBackgroundBlur() },
             onStop: stopRecording
         )
         window.contentView = NSHostingView(rootView: overlay)
@@ -581,7 +725,9 @@ struct MainWindow: View {
             webcamManager.stopCapture()
             webcamPiPWindow?.close()
             webcamPiPWindow = nil
+            webcamPiPView = nil
             overlayState.webcamEnabled = false
+            overlayState.backgroundBlurEnabled = false
         } else {
             Task {
                 let granted = await webcamManager.requestCameraPermission()
@@ -616,14 +762,126 @@ struct MainWindow: View {
         webcamManager.stopCapture()
         webcamPiPWindow?.close()
         webcamPiPWindow = nil
+        webcamPiPView = nil
+
+        // Hide teleprompter
+        hideTeleprompter()
     }
 
     private func showWebcamPiP(previewLayer: AVCaptureVideoPreviewLayer) {
         let window = WebcamPiPWindow()
-        let view = WebcamPiPView(previewLayer: previewLayer)
+        let view = WebcamPiPView(
+            previewLayer: previewLayer,
+            processedLayer: webcamManager.processedFrameLayer
+        )
         window.contentView = view
         window.orderFront(nil)
         webcamPiPWindow = window
+        webcamPiPView = view
+
+        // Auto-enable blur if setting is on
+        if settings.webcamSettings.backgroundBlurEnabled {
+            webcamManager.enableBackgroundBlur(intensity: settings.webcamSettings.blurIntensity)
+            view.setBlurEnabled(true)
+            overlayState.backgroundBlurEnabled = true
+        }
+    }
+
+    private func toggleBackgroundBlur() {
+        print("🟡 toggleBackgroundBlur — webcamWindow: \(webcamPiPWindow != nil), view: \(webcamPiPView != nil), wasBlur: \(webcamManager.backgroundBlurEnabled)")
+        guard webcamPiPWindow != nil else {
+            print("🔴 BAILED — no webcam window")
+            return
+        }
+
+        if webcamManager.backgroundBlurEnabled {
+            webcamPiPView?.setBlurEnabled(false)
+            webcamManager.disableBackgroundBlur()
+        } else {
+            webcamManager.enableBackgroundBlur(intensity: settings.webcamSettings.blurIntensity)
+            webcamPiPView?.setBlurEnabled(true)
+        }
+        let blurNowEnabled = webcamManager.backgroundBlurEnabled
+        overlayState.backgroundBlurEnabled = blurNowEnabled
+        settings.webcamSettings.backgroundBlurEnabled = blurNowEnabled
+        print("🟢 Result — blur: \(blurNowEnabled), overlay: \(overlayState.backgroundBlurEnabled)")
+    }
+
+    // MARK: - Webcam Preview
+
+    private func showWebcamPreview() {
+        // Close existing preview
+        webcamPreviewWindow?.close()
+        webcamPreviewWindow = nil
+
+        // Start webcam if not running
+        guard let previewLayer = webcamManager.startCapture(deviceID: settings.webcamSettings.selectedDeviceID) else {
+            showError("Could not start webcam")
+            return
+        }
+
+        // Create preview window
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 400),
+            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Webcam Preview"
+        window.isFloatingPanel = true
+        window.level = .floating
+        window.center()
+
+        let previewView = WebcamPreviewView(
+            webcamManager: webcamManager,
+            previewLayer: previewLayer,
+            blurEnabled: settings.webcamSettings.backgroundBlurEnabled,
+            blurIntensity: settings.webcamSettings.blurIntensity
+        )
+        window.contentView = NSHostingView(rootView: previewView)
+        window.orderFront(nil)
+        webcamPreviewWindow = window
+
+        // Enable blur if setting is on
+        if settings.webcamSettings.backgroundBlurEnabled {
+            webcamManager.enableBackgroundBlur(intensity: settings.webcamSettings.blurIntensity)
+        }
+    }
+
+    // MARK: - Teleprompter Lifecycle
+
+    private func showTeleprompter() {
+        guard teleprompterWindow == nil else { return }
+        let window = TeleprompterWindow()
+        window.teleprompterState = teleprompterState
+        teleprompterState.fontSize = settings.teleprompterSettings.fontSize
+        teleprompterState.opacity = settings.teleprompterSettings.opacity
+        teleprompterState.parseScript(settings.teleprompterSettings.scriptText)
+
+        let view = TeleprompterView(state: teleprompterState)
+        window.contentView = NSHostingView(rootView: view)
+        window.orderFront(nil)
+        window.startKeyMonitor()
+        teleprompterWindow = window
+        hotkeyManager.teleprompterActive = true
+    }
+
+    private func hideTeleprompter() {
+        teleprompterWindow?.stopKeyMonitor()
+        teleprompterWindow?.orderOut(nil)
+        teleprompterWindow?.close()
+        teleprompterWindow = nil
+        hotkeyManager.teleprompterActive = false
+    }
+
+    private func toggleTeleprompter() {
+        if teleprompterWindow != nil {
+            hideTeleprompter()
+            overlayState.teleprompterEnabled = false
+        } else {
+            showTeleprompter()
+            overlayState.teleprompterEnabled = true
+        }
     }
 
     private func updateDefaultOutputURL() {
@@ -679,6 +937,22 @@ struct MainWindow: View {
             case .toggleMicrophone:
                 if recorder.state.isRecording {
                     toggleMicDuringRecording()
+                }
+            case .toggleTeleprompter:
+                if recorder.state.isRecording {
+                    toggleTeleprompter()
+                }
+            case .teleprompterNext:
+                if teleprompterWindow != nil {
+                    teleprompterState.nextPage()
+                }
+            case .teleprompterPrevious:
+                if teleprompterWindow != nil {
+                    teleprompterState.previousPage()
+                }
+            case .toggleBackgroundBlur:
+                if recorder.state.isRecording {
+                    toggleBackgroundBlur()
                 }
             }
         }

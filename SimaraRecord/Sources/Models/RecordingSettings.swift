@@ -16,6 +16,7 @@ struct RecordingSettings {
     var frameRate: FrameRate
     var audioSettings: AudioSettings
     var webcamSettings: WebcamSettings
+    var teleprompterSettings: TeleprompterSettings
     var outputURL: URL
 
     static var `default`: RecordingSettings {
@@ -29,6 +30,7 @@ struct RecordingSettings {
             frameRate: .fps60,
             audioSettings: AudioSettings(),
             webcamSettings: WebcamSettings(),
+            teleprompterSettings: TeleprompterSettings(),
             outputURL: desktopURL.appendingPathComponent(filename)
         )
     }
@@ -121,6 +123,17 @@ struct AudioSettings {
 struct WebcamSettings {
     var enabled: Bool = false
     var selectedDeviceID: String?
+    var backgroundBlurEnabled: Bool = false
+    var blurIntensity: Double = 0.7  // 0.0 (subtle) to 1.0 (heavy), maps to sigma 5–30
+}
+
+// MARK: - Teleprompter Settings
+
+struct TeleprompterSettings {
+    var enabled: Bool = false
+    var scriptText: String = ""
+    var fontSize: CGFloat = 28.0
+    var opacity: Double = 0.85
 }
 
 // MARK: - Recording State

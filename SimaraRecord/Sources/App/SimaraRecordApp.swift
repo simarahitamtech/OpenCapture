@@ -47,18 +47,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupMainMenu() {
-        let mainMenu = NSMenu()
+        // Add a Recording menu to the existing menu bar (preserves SwiftUI's Edit menu
+        // which provides working ⌘C/⌘V/⌘X/⌘A in text fields)
+        guard let mainMenu = NSApp.mainMenu else { return }
 
-        // App menu
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About OpenCapture", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit OpenCapture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        let appMenuItem = NSMenuItem()
-        appMenuItem.submenu = appMenu
-        mainMenu.addItem(appMenuItem)
-
-        // Recording menu
         let recordingMenu = NSMenu(title: "Recording")
         let startStopItem = NSMenuItem(title: "Start/Stop Recording", action: nil, keyEquivalent: "r")
         startStopItem.keyEquivalentModifierMask = [.command, .shift]
@@ -88,6 +80,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         micItem.keyEquivalentModifierMask = [.command, .shift]
         recordingMenu.addItem(micItem)
 
+        let teleprompterItem = NSMenuItem(title: "Toggle Teleprompter", action: nil, keyEquivalent: "t")
+        teleprompterItem.keyEquivalentModifierMask = [.command, .shift]
+        recordingMenu.addItem(teleprompterItem)
+
+        let blurItem = NSMenuItem(title: "Toggle Background Blur", action: nil, keyEquivalent: "b")
+        blurItem.keyEquivalentModifierMask = [.command, .shift]
+        recordingMenu.addItem(blurItem)
+
         recordingMenu.addItem(.separator())
 
         let cancelItem = NSMenuItem(title: "Cancel Recording", action: nil, keyEquivalent: "\u{1b}") // Escape
@@ -97,8 +97,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let recordingMenuItem = NSMenuItem()
         recordingMenuItem.submenu = recordingMenu
         mainMenu.addItem(recordingMenuItem)
-
-        NSApp.mainMenu = mainMenu
     }
 
     private func installIconInBundle(_ icon: NSImage) {
