@@ -25,6 +25,17 @@ A native macOS screen recorder built with SwiftUI and ScreenCaptureKit. Your rec
 - Camera device selection
 - Draggable — reposition anywhere on screen
 - Toggle on/off during recording
+- Background blur (Vision-based person segmentation)
+- Preview popup to test blur without recording
+
+**Teleprompter**
+- Floating script overlay (invisible to recordings)
+- Multi-page support with `###` or `---` separators
+- Bold text with `*text*` or `**text**` (yellow)
+- Italic text with `_text_` (cyan)
+- Bullet points with `- item`
+- Arrow key navigation between pages
+- Adjustable font size and opacity
 
 **Annotation**
 - Draw on screen during recording
@@ -42,6 +53,9 @@ A native macOS screen recorder built with SwiftUI and ScreenCaptureKit. Your rec
 | `⇧⌘D` | Clear Annotations |
 | `⇧⌘V` | Toggle Webcam |
 | `⇧⌘M` | Toggle Microphone |
+| `⇧⌘T` | Toggle Teleprompter |
+| `⇧⌘B` | Toggle Background Blur |
+| `←` `→` | Teleprompter page navigation |
 | `Esc` | Cancel Recording |
 
 All shortcuts work globally — even when the app is in the background.
@@ -101,6 +115,7 @@ SimaraRecord/Sources/
 │   ├── VideoWriter.swift        # Incremental MP4 file writer
 │   ├── AudioManager.swift       # Mic device discovery & levels
 │   ├── WebcamManager.swift      # Camera device discovery & capture
+│   ├── BackgroundBlurProcessor.swift  # Vision person segmentation
 │   └── HotkeyManager.swift     # Global keyboard shortcuts
 ├── Models/
 │   └── RecordingSettings.swift  # Recording configuration types
@@ -109,7 +124,8 @@ SimaraRecord/Sources/
     ├── RecordingOverlay.swift   # Floating timer & controls
     ├── RegionSelector.swift     # Custom region selection
     ├── AnnotationOverlay.swift  # On-screen drawing
-    └── WebcamOverlay.swift      # Webcam PiP window
+    ├── WebcamOverlay.swift      # Webcam PiP window
+    └── TeleprompterWindow.swift # Teleprompter overlay & editor
 ```
 
 ## How It Works
@@ -130,6 +146,8 @@ The recording is playable from the first second. If the app crashes, you lose at
 - **ScreenCaptureKit** — hardware-accelerated screen capture
 - **AVFoundation** — H.264 encoding and file writing
 - **AVCaptureSession** — microphone and webcam capture
+- **Vision** — person segmentation for background blur
+- **Core Image** — GPU-accelerated blur compositing
 - **SwiftUI + AppKit** — native macOS UI
 - **NSEvent monitors** — global keyboard shortcuts
 
