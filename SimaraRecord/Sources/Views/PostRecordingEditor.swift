@@ -317,7 +317,7 @@ struct PostRecordingEditor: View {
                 VStack(spacing: 8) {
                     // Video preview
                     if let player = trimPlayer {
-                        VideoPlayer(player: player)
+                        TrimPlayerView(player: player)
                             .frame(height: 160)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     } else {
@@ -808,5 +808,23 @@ class PostRecordingWindow: NSWindow {
             self.close()
         })
         self.contentView = NSHostingView(rootView: view)
+    }
+}
+
+// MARK: - AVPlayerView Wrapper (replaces VideoPlayer to avoid runtime crash)
+
+struct TrimPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let playerView = AVPlayerView()
+        playerView.player = player
+        playerView.controlsStyle = .inline
+        playerView.showsFullScreenToggleButton = false
+        return playerView
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        nsView.player = player
     }
 }
