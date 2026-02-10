@@ -34,7 +34,6 @@ struct PostRecordingEditor: View {
     // Trim
     @State private var trimStart: Double = 0
     @State private var trimEnd: Double = 0
-    @State private var trimThumbnails: [CGImage] = []
     @State private var trimPlayer: AVPlayer?
     @State private var trimPlayerTime: Double = 0
     @State private var trimTimeObserver: Any?
@@ -84,7 +83,7 @@ struct PostRecordingEditor: View {
             // Footer with actions
             footer
         }
-        .frame(width: 500, height: 700)
+        .frame(width: 500, height: 780)
         .background(Color(NSColor.windowBackgroundColor))
         .alert("Error", isPresented: $showingError) {
             Button("OK", role: .cancel) {}
@@ -364,23 +363,6 @@ struct PostRecordingEditor: View {
                 .padding(8)
             }
 
-            // Thumbnail strip
-            if !trimThumbnails.isEmpty {
-                GeometryReader { geo in
-                    HStack(spacing: 2) {
-                        ForEach(Array(trimThumbnails.enumerated()), id: \.offset) { _, thumb in
-                            Image(decorative: thumb, scale: 1.0)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .frame(width: (geo.size.width - CGFloat(trimThumbnails.count - 1) * 2) / CGFloat(trimThumbnails.count), height: 40)
-                                .clipped()
-                        }
-                    }
-                }
-                .frame(height: 40)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
-
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     // Start trim
@@ -594,12 +576,6 @@ struct PostRecordingEditor: View {
                 print("Failed to generate thumbnail: \(error)")
             }
 
-            // Generate trim strip
-            do {
-                trimThumbnails = try await thumbnailGenerator.generateStrip(from: videoURL, count: 8, size: .small)
-            } catch {
-                print("Failed to generate strip: \(error)")
-            }
         }
     }
 
@@ -817,7 +793,7 @@ struct PostRecordingEditor: View {
 class PostRecordingWindow: NSWindow {
     init(videoURL: URL, onDismiss: @escaping () -> Void) {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 780),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
