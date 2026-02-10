@@ -16,6 +16,8 @@ class WebcamManager: ObservableObject {
     @Published var selectedCamera: CameraDevice?
     @Published var isRunning = false
     @Published var backgroundBlurEnabled = false
+    @Published var backgroundMode: WebcamBackgroundMode = .none
+    @Published var backgroundImageURL: URL?
 
     private var captureSession: AVCaptureSession?
     private var previewLayer: AVCaptureVideoPreviewLayer?
@@ -190,7 +192,15 @@ class WebcamManager: ObservableObject {
     }
 
     func enableBackgroundBlur(intensity: Double = 0.7) {
-        print("🔵 enableBackgroundBlur called — isRunning: \(isRunning), dataOutput: \(videoDataOutput != nil), procLayer: \(processedFrameLayer != nil)")
+        print("🔵 enableBackgroundBlur called — isRunning: \(isRunning), dataOutput: \(videoDataOutput != nil), procLayer: \(processedFrameLayer != nil), alreadyEnabled: \(backgroundBlurEnabled)")
+
+        // If already enabled with a processor, just update intensity and return
+        if backgroundBlurEnabled, blurProcessor != nil {
+            print("🔵 enableBackgroundBlur — already enabled, updating intensity only")
+            updateBlurIntensity(intensity)
+            return
+        }
+
         guard isRunning, let dataOutput = videoDataOutput else {
             print("🔴 enableBackgroundBlur BAILED — missing dataOutput or not running")
             return
@@ -211,6 +221,12 @@ class WebcamManager: ObservableObject {
         dataOutput.setSampleBufferDelegate(adapter, queue: videoOutputQueue)
 
         backgroundBlurEnabled = true
+        // Only set to blur mode if not already in image mode
+        if case .image = backgroundMode {
+            // Keep image mode
+        } else {
+            backgroundMode = .blur
+        }
         print("🔵 enableBackgroundBlur SUCCESS — blur is now ON")
     }
 
@@ -222,6 +238,8 @@ class WebcamManager: ObservableObject {
         delegateAdapter = nil
 
         backgroundBlurEnabled = false
+        backgroundMode = .none
+        // NOTE: Don't clear backgroundImageURL here - preserve it for re-enabling
 
         // Ensure the capture session is still running for the preview layer
         if let session = captureSession, !session.isRunning {
@@ -235,6 +253,78 @@ class WebcamManager: ObservableObject {
             disableBackgroundBlur()
         } else {
             enableBackgroundBlur(intensity: intensity)
+        }
+    }
+
+    // MARK: - Virtual Background
+
+    /// Sets a virtual background image for the webcam feed
+    /// - Parameters:
+    ///   - url: File URL to the background image
+    ///   - intensity: Blur intensity to use as fallback (0.0 to 1.0)
+    /// - Returns: true if the background image was set successfully
+    @discardableResult
+    func setBackgroundImage(url: URL, intensity: Double = 0.7) -> Bool {
+        print("🔵 setBackgroundImage called — url: \(url.path)")
+
+        // If not currently running with blur/background processing, start it
+        if !backgroundBlurEnabled {
+            enableBackgroundBlur(intensity: intensity)
+        }
+
+        // Set the background image on the processor
+        guard let processor = blurProcessor else {
+            print("🔴 setBackgroundImage FAILED — no blur processor")
+            return false
+        }
+
+        let success = processor.setBackgroundImage(url: url)
+        if success {
+            backgroundImageURL = url
+            backgroundMode = .image(url)
+            print("✅ Virtual background set successfully")
+        }
+        return success
+    }
+
+    /// Clears the virtual background and switches back to blur mode
+    func clearBackgroundImage() {
+        print("🔵 clearBackgroundImage called")
+        blurProcessor?.clearBackgroundImage()
+        backgroundImageURL = nil
+
+        // If background processing was enabled, switch mode to blur
+        if backgroundBlurEnabled {
+            backgroundMode = .blur
+        } else {
+            backgroundMode = .none
+        }
+        print("🔵 Virtual background cleared")
+    }
+
+    /// Sets the background mode (none, blur, or image)
+    /// - Parameters:
+    ///   - mode: The background mode to set
+    ///   - intensity: Blur intensity (0.0 to 1.0), used for blur mode
+    func setBackgroundMode(_ mode: WebcamBackgroundMode, intensity: Double = 0.7) {
+        print("🔵 setBackgroundMode called — mode: \(mode)")
+
+        switch mode {
+        case .none:
+            disableBackgroundBlur()
+            clearBackgroundImage()
+            backgroundMode = .none
+
+        case .blur:
+            clearBackgroundImage()
+            if !backgroundBlurEnabled {
+                enableBackgroundBlur(intensity: intensity)
+            }
+            blurProcessor?.processingMode = .blur
+            backgroundMode = .blur
+
+        case .image(let url):
+            setBackgroundImage(url: url, intensity: intensity)
         }
     }
 

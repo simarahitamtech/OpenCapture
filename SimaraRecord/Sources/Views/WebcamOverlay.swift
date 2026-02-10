@@ -46,17 +46,19 @@ class WebcamPiPView: NSView {
     private let previewLayer: AVCaptureVideoPreviewLayer
     private let borderLayer = CAShapeLayer()
     private var processedLayer: CALayer?
+    private var shape: WebcamShape
 
-    init(previewLayer: AVCaptureVideoPreviewLayer, processedLayer: CALayer? = nil) {
+    init(previewLayer: AVCaptureVideoPreviewLayer, processedLayer: CALayer? = nil, shape: WebcamShape = .circle) {
         self.previewLayer = previewLayer
         self.processedLayer = processedLayer
+        self.shape = shape
         super.init(frame: .zero)
 
         wantsLayer = true
         guard let rootLayer = layer else { return }
 
-        // Circular mask on the root layer
-        rootLayer.cornerRadius = 100 // half of 200
+        // Apply initial corner radius based on shape
+        rootLayer.cornerRadius = cornerRadius(for: shape, width: 200)
         rootLayer.masksToBounds = true
 
         // Add preview layer (visible when blur is OFF)
@@ -71,7 +73,7 @@ class WebcamPiPView: NSView {
             rootLayer.addSublayer(procLayer)
         }
 
-        // Add circular border on top (always visible)
+        // Add border on top (always visible)
         borderLayer.fillColor = nil
         borderLayer.strokeColor = NSColor.white.withAlphaComponent(0.8).cgColor
         borderLayer.lineWidth = 3
@@ -86,15 +88,55 @@ class WebcamPiPView: NSView {
     func setBlurEnabled(_ enabled: Bool) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        previewLayer.isHidden = enabled
-        processedLayer?.isHidden = !enabled
-        // Ensure layers have correct frames after visibility change
-        if let rootLayer = layer {
-            previewLayer.frame = rootLayer.bounds
-            processedLayer?.frame = rootLayer.bounds
+
+        if enabled {
+            // Switching TO processed layer (blur ON)
+            processedLayer?.isHidden = false
+            previewLayer.isHidden = true
+        } else {
+            // Switching TO preview layer (blur OFF)
+            previewLayer.isHidden = false
+            processedLayer?.isHidden = true
+
+            // Ensure the preview layer connection is active and frame is correct
+            if let rootLayer = layer {
+                previewLayer.frame = rootLayer.bounds
+                // Ensure connection is enabled (can get disabled during layer switching)
+                previewLayer.connection?.isEnabled = true
+            }
         }
+
         CATransaction.commit()
         needsLayout = true
+    }
+
+    /// Update the shape of the webcam overlay
+    func setShape(_ newShape: WebcamShape) {
+        shape = newShape
+        needsLayout = true
+    }
+
+    private func cornerRadius(for shape: WebcamShape, width: CGFloat) -> CGFloat {
+        switch shape {
+        case .circle:
+            return width / 2
+        case .roundedSquare:
+            return width * 0.2
+        case .square:
+            return 0
+        }
+    }
+
+    private func borderPath(for shape: WebcamShape, in rect: CGRect) -> CGPath {
+        let radius = cornerRadius(for: shape, width: rect.width)
+        switch shape {
+        case .circle:
+            return CGPath(ellipseIn: rect, transform: nil)
+        case .roundedSquare:
+            return CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+        case .square:
+            return CGPath(rect: rect, transform: nil)
+        }
     }
 
     override func layout() {
@@ -107,10 +149,10 @@ class WebcamPiPView: NSView {
 
         previewLayer.frame = rootLayer.bounds
         processedLayer?.frame = rootLayer.bounds
-        rootLayer.cornerRadius = bounds.width / 2
+        rootLayer.cornerRadius = cornerRadius(for: shape, width: bounds.width)
 
         let borderRect = bounds.insetBy(dx: 1.5, dy: 1.5)
-        borderLayer.path = CGPath(ellipseIn: borderRect, transform: nil)
+        borderLayer.path = borderPath(for: shape, in: borderRect)
         borderLayer.frame = rootLayer.bounds
 
         CATransaction.commit()

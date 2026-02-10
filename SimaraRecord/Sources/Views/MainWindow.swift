@@ -31,6 +31,7 @@ struct MainWindow: View {
     @State private var teleprompterWindow: TeleprompterWindow?
     @State private var scriptEditorWindow: NSWindow?
     @State private var webcamPreviewWindow: NSWindow?
+    @State private var postRecordingWindow: PostRecordingWindow?
     @StateObject private var overlayState = OverlayToggleState()
 
     var body: some View {
@@ -70,7 +71,7 @@ struct MainWindow: View {
             shortcutsHint
         }
         .padding(16)
-        .frame(width: 500)
+        .frame(width: 540)
         .fixedSize(horizontal: false, vertical: true)
         .background(Color(NSColor.windowBackgroundColor))
         .alert("Error", isPresented: $showingError) {
@@ -148,6 +149,14 @@ struct MainWindow: View {
             }
 
             Spacer()
+
+            // Edit existing recording button
+            Button(action: openExistingRecording) {
+                Image(systemName: "folder")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.bordered)
+            .help("Edit existing recording (⌘O)")
         }
     }
 
@@ -338,10 +347,49 @@ struct MainWindow: View {
                 .font(.system(size: 11))
                 .disabled(recorder.state.isRecording)
 
-                Toggle("Background blur", isOn: $settings.webcamSettings.backgroundBlurEnabled)
-                    .font(.system(size: 12))
+                // Background options row
+                HStack(spacing: 8) {
+                    Text("Background")
+                        .font(.system(size: 12))
 
-                if settings.webcamSettings.backgroundBlurEnabled {
+                    Spacer()
+
+                    // Blur toggle
+                    Toggle("Blur", isOn: $settings.webcamSettings.backgroundBlurEnabled)
+                        .toggleStyle(.button)
+                        .font(.system(size: 10))
+                        .controlSize(.small)
+
+                    // Virtual background image button
+                    if let bgURL = settings.webcamSettings.backgroundImageURL {
+                        HStack(spacing: 4) {
+                            Text(bgURL.lastPathComponent)
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: 80)
+
+                            Button(action: clearBackgroundImage) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 10))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.secondary)
+                            .help("Remove background image")
+                        }
+                    } else {
+                        Button("Image...") {
+                            selectBackgroundImage()
+                        }
+                        .font(.system(size: 10))
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+
+                // Blur intensity slider (only when blur is on and no image)
+                if settings.webcamSettings.backgroundBlurEnabled && settings.webcamSettings.backgroundImageURL == nil {
                     HStack(spacing: 6) {
                         Image(systemName: "aqi.low")
                             .font(.system(size: 10))
@@ -361,6 +409,24 @@ struct MainWindow: View {
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(.secondary)
                             .frame(width: 32, alignment: .trailing)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Text("Shape")
+                        .font(.system(size: 12))
+                        .frame(width: 40, alignment: .leading)
+
+                    Picker("", selection: $settings.webcamSettings.shape) {
+                        ForEach(WebcamShape.allCases) { shape in
+                            Text(shape.rawValue).tag(shape)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(recorder.state.isRecording)
+                    .onChange(of: settings.webcamSettings.shape) { newShape in
+                        webcamPiPView?.setShape(newShape)
                     }
                 }
 
@@ -687,13 +753,23 @@ struct MainWindow: View {
                 // Hide recording overlay
                 hideRecordingOverlay()
 
-                // Show file in Finder
-                NSWorkspace.shared.activateFileViewerSelecting([settings.outputURL])
+                // Show post-recording editor
+                showPostRecordingEditor()
 
             } catch {
                 showError(error.localizedDescription)
             }
         }
+    }
+
+    private func showPostRecordingEditor() {
+        let window = PostRecordingWindow(videoURL: settings.outputURL) { [self] in
+            postRecordingWindow = nil
+            // Generate new output URL for next recording
+            updateDefaultOutputURL()
+        }
+        window.makeKeyAndOrderFront(nil)
+        postRecordingWindow = window
     }
 
     private func showRecordingOverlay() {
@@ -772,7 +848,8 @@ struct MainWindow: View {
         let window = WebcamPiPWindow()
         let view = WebcamPiPView(
             previewLayer: previewLayer,
-            processedLayer: webcamManager.processedFrameLayer
+            processedLayer: webcamManager.processedFrameLayer,
+            shape: settings.webcamSettings.shape
         )
         window.contentView = view
         window.orderFront(nil)
@@ -784,6 +861,11 @@ struct MainWindow: View {
             webcamManager.enableBackgroundBlur(intensity: settings.webcamSettings.blurIntensity)
             view.setBlurEnabled(true)
             overlayState.backgroundBlurEnabled = true
+
+            // Apply background image if one is set
+            if let bgURL = settings.webcamSettings.backgroundImageURL {
+                webcamManager.setBackgroundImage(url: bgURL, intensity: settings.webcamSettings.blurIntensity)
+            }
         }
     }
 
@@ -795,16 +877,58 @@ struct MainWindow: View {
         }
 
         if webcamManager.backgroundBlurEnabled {
+            // Turning OFF — switch to preview layer first, then disable processing
             webcamPiPView?.setBlurEnabled(false)
             webcamManager.disableBackgroundBlur()
         } else {
+            // Turning ON — enable blur processing first
             webcamManager.enableBackgroundBlur(intensity: settings.webcamSettings.blurIntensity)
-            webcamPiPView?.setBlurEnabled(true)
+
+            // Re-apply background image if one was set (do this BEFORE switching layers)
+            if let bgURL = settings.webcamSettings.backgroundImageURL {
+                webcamManager.setBackgroundImage(url: bgURL, intensity: settings.webcamSettings.blurIntensity)
+            }
+
+            // Give the processor a moment to start producing frames, then switch layers
+            let view = webcamPiPView
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                view?.setBlurEnabled(true)
+            }
         }
         let blurNowEnabled = webcamManager.backgroundBlurEnabled
         overlayState.backgroundBlurEnabled = blurNowEnabled
         settings.webcamSettings.backgroundBlurEnabled = blurNowEnabled
         print("🟢 Result — blur: \(blurNowEnabled), overlay: \(overlayState.backgroundBlurEnabled)")
+    }
+
+    private func selectBackgroundImage() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Background Image"
+        panel.allowedContentTypes = [.image, .png, .jpeg]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.webcamSettings.backgroundImageURL = url
+            // Auto-enable background processing
+            settings.webcamSettings.backgroundBlurEnabled = true
+
+            // If webcam is running, apply immediately
+            if webcamManager.isRunning {
+                if !webcamManager.backgroundBlurEnabled {
+                    webcamManager.enableBackgroundBlur(intensity: settings.webcamSettings.blurIntensity)
+                    webcamPiPView?.setBlurEnabled(true)
+                    overlayState.backgroundBlurEnabled = true
+                }
+                webcamManager.setBackgroundImage(url: url, intensity: settings.webcamSettings.blurIntensity)
+            }
+        }
+    }
+
+    private func clearBackgroundImage() {
+        settings.webcamSettings.backgroundImageURL = nil
+        webcamManager.clearBackgroundImage()
     }
 
     // MARK: - Webcam Preview
@@ -842,9 +966,14 @@ struct MainWindow: View {
         window.orderFront(nil)
         webcamPreviewWindow = window
 
-        // Enable blur if setting is on
+        // Enable blur/background if setting is on
         if settings.webcamSettings.backgroundBlurEnabled {
             webcamManager.enableBackgroundBlur(intensity: settings.webcamSettings.blurIntensity)
+
+            // Apply background image if one is set
+            if let bgURL = settings.webcamSettings.backgroundImageURL {
+                webcamManager.setBackgroundImage(url: bgURL, intensity: settings.webcamSettings.blurIntensity)
+            }
         }
     }
 
@@ -894,6 +1023,22 @@ struct MainWindow: View {
     private func showError(_ message: String) {
         errorMessage = message
         showingError = true
+    }
+
+    private func openExistingRecording() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Recording to Edit"
+        panel.allowedContentTypes = [.movie, .mpeg4Movie, .quickTimeMovie]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        if panel.runModal() == .OK, let url = panel.url {
+            let window = PostRecordingWindow(videoURL: url) {
+                // Window closed
+            }
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     // MARK: - Hotkeys

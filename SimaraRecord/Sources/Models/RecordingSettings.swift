@@ -118,13 +118,34 @@ struct AudioSettings {
     }
 }
 
+// MARK: - Webcam Shape
+
+enum WebcamShape: String, CaseIterable, Identifiable {
+    case circle = "Circle"
+    case roundedSquare = "Rounded"
+    case square = "Square"
+
+    var id: String { rawValue }
+}
+
+// MARK: - Webcam Background Mode
+
+enum WebcamBackgroundMode: Equatable {
+    case none
+    case blur
+    case image(URL)
+}
+
 // MARK: - Webcam Settings
 
 struct WebcamSettings {
     var enabled: Bool = false
     var selectedDeviceID: String?
-    var backgroundBlurEnabled: Bool = false
+    var backgroundMode: WebcamBackgroundMode = .none
+    var backgroundBlurEnabled: Bool = false  // Legacy: kept for compatibility, use backgroundMode instead
     var blurIntensity: Double = 0.7  // 0.0 (subtle) to 1.0 (heavy), maps to sigma 5–30
+    var backgroundImageURL: URL?  // URL to the virtual background image
+    var shape: WebcamShape = .circle
 }
 
 // MARK: - Teleprompter Settings

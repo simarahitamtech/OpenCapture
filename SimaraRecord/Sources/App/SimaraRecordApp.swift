@@ -51,6 +51,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // which provides working ⌘C/⌘V/⌘X/⌘A in text fields)
         guard let mainMenu = NSApp.mainMenu else { return }
 
+        // File menu with Open Recording
+        let fileMenu = NSMenu(title: "File")
+        let openItem = NSMenuItem(title: "Edit Recording...", action: #selector(openRecordingForEditing), keyEquivalent: "o")
+        openItem.keyEquivalentModifierMask = [.command]
+        openItem.target = self
+        fileMenu.addItem(openItem)
+
+        let fileMenuItem = NSMenuItem()
+        fileMenuItem.submenu = fileMenu
+        mainMenu.insertItem(fileMenuItem, at: 1) // After the app menu
+
         let recordingMenu = NSMenu(title: "Recording")
         let startStopItem = NSMenuItem(title: "Start/Stop Recording", action: nil, keyEquivalent: "r")
         startStopItem.keyEquivalentModifierMask = [.command, .shift]
@@ -126,6 +137,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return true
+    }
+
+    @objc private func openRecordingForEditing() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Recording to Edit"
+        panel.allowedContentTypes = [.movie, .mpeg4Movie, .quickTimeMovie]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        if panel.runModal() == .OK, let url = panel.url {
+            let window = PostRecordingWindow(videoURL: url) {
+                // Window closed - nothing to do
+            }
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 }
 
