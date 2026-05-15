@@ -100,8 +100,6 @@ class ScreenRecorder: NSObject, ObservableObject {
             throw RecorderError.invalidState
         }
 
-        self.settings = settings
-
         // Fetch displays — this also verifies permission at runtime.
         // SCShareableContent is the true permission check; CGPreflight can be stale.
         await updateAvailableDisplays()
@@ -110,11 +108,41 @@ class ScreenRecorder: NSObject, ObservableObject {
             throw RecorderError.permissionRequired
         }
 
+        // Resolve window-capture mode up front. If the user picked a window
+        // that has since been closed, fall back gracefully to full screen
+        // instead of failing hard.
+        var workingSettings = settings
+        var pickedWindow: SCWindow?
+        if case .window(let windowID) = workingSettings.region {
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                if let match = content.windows.first(where: { $0.windowID == windowID }) {
+                    pickedWindow = match
+                } else {
+                    print("⚠️ Picked window \(windowID) is no longer available — falling back to full screen.")
+                    workingSettings.region = .fullScreen
+                }
+            } catch {
+                print("⚠️ Could not fetch shareable content for window capture (\(error)) — falling back to full screen.")
+                workingSettings.region = .fullScreen
+            }
+        }
+
+        self.settings = workingSettings
+
         print("🔍 Using display: \(display.width)x\(display.height)")
 
         // Create content filter
         let contentFilter: SCContentFilter
-        if let customRect = settings.region.rect {
+        if let scWindow = pickedWindow {
+            // Window capture: produces a stream of just this window, independent
+            // of its on-screen position. Width/height come from the window itself.
+            contentFilter = SCContentFilter(desktopIndependentWindow: scWindow)
+            let f = scWindow.frame
+            let title = scWindow.title ?? ""
+            let appName = scWindow.owningApplication?.applicationName ?? "?"
+            print("🎯 Recording window \(scWindow.windowID) \"\(title)\" (\(appName)): \(Int(f.width))x\(Int(f.height)) pts")
+        } else if let customRect = workingSettings.region.rect {
             // Custom region recording
             contentFilter = SCContentFilter(display: display, excludingWindows: [])
             print("🎯 Recording custom region: \(customRect)")
@@ -131,9 +159,22 @@ class ScreenRecorder: NSObject, ObservableObject {
         // Important: sourceRect is in points, width/height are in pixels.
         let backingScale = backingScaleFactor(for: display)
         let screenFramePoints = screenFrameInPoints(for: display)
-        var captureRectPoints = settings.region.rect?.standardized
 
-        if let rectPoints = captureRectPoints {
+        if let scWindow = pickedWindow {
+            // For desktopIndependentWindow capture, SCContentFilter already
+            // constrains the capture to the window — we MUST NOT set a
+            // sourceRect (that's a display-space concept). Only size the
+            // output buffer based on the window's pixel dimensions.
+            let windowWidthPts = scWindow.frame.width
+            let windowHeightPts = scWindow.frame.height
+            let pixelWidth = max(2, Int((windowWidthPts * backingScale).rounded(.down)))
+            let pixelHeight = max(2, Int((windowHeightPts * backingScale).rounded(.down)))
+            let evenPixelWidth = (pixelWidth / 2) * 2
+            let evenPixelHeight = (pixelHeight / 2) * 2
+            streamConfig.width = evenPixelWidth
+            streamConfig.height = evenPixelHeight
+            print("🎯 Window capture size (pixels): \(evenPixelWidth)x\(evenPixelHeight), scale: \(backingScale)")
+        } else if let rectPoints = workingSettings.region.rect?.standardized {
             // Clamp to screen bounds (points)
             let clampedPoints = rectPoints.intersection(screenFramePoints)
 
@@ -154,7 +195,6 @@ class ScreenRecorder: NSObject, ObservableObject {
                 height: max(2, evenHeightPoints)
             )
 
-            captureRectPoints = evenRectPoints
             streamConfig.sourceRect = evenRectPoints
             streamConfig.width = evenPixelWidth
             streamConfig.height = evenPixelHeight
@@ -174,7 +214,7 @@ class ScreenRecorder: NSObject, ObservableObject {
             }
             print("🎯 Full-screen capture size (pixels): \(evenWidth)x\(evenHeight), scale: \(backingScale)")
         }
-        streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate.rawValue))
+        streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(workingSettings.frameRate.rawValue))
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfig.showsCursor = true
 

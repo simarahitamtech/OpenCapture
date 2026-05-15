@@ -18,6 +18,7 @@ struct RecordingSettings {
     var webcamSettings: WebcamSettings
     var teleprompterSettings: TeleprompterSettings
     var outputURL: URL
+    var excludedWindowIDs: [CGWindowID] = []
 
     static var `default`: RecordingSettings {
         let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
@@ -41,6 +42,10 @@ struct RecordingSettings {
 enum RecordingRegion: Equatable, Hashable {
     case fullScreen
     case custom(CGRect)
+    /// Capture a single on-screen window by its CGWindowID.
+    /// Resolved to an SCWindow at recording-start time; falls back
+    /// to .fullScreen if the window is no longer available.
+    case window(CGWindowID)
 
     var rect: CGRect? {
         switch self {
@@ -48,6 +53,11 @@ enum RecordingRegion: Equatable, Hashable {
             return nil // Will capture main display
         case .custom(let rect):
             return rect
+        case .window:
+            // The capture rect comes from the SCWindow itself (via
+            // SCContentFilter(desktopIndependentWindow:)); there is no
+            // display-space sourceRect to clip on.
+            return nil
         }
     }
 }
