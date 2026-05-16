@@ -132,6 +132,22 @@ class ScreenRecorder: NSObject, ObservableObject {
 
         print("🔍 Using display: \(display.width)x\(display.height)")
 
+        // Resolve excluded windows (webcam PiP, recording overlay, etc.) so they
+        // aren't baked into the screen capture. The IDs come from the Pro layer.
+        var windowsToExclude: [SCWindow] = []
+        if !workingSettings.excludedWindowIDs.isEmpty {
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                let idSet = Set(workingSettings.excludedWindowIDs)
+                windowsToExclude = content.windows.filter { idSet.contains($0.windowID) }
+                if !windowsToExclude.isEmpty {
+                    print("🚫 Excluding \(windowsToExclude.count) windows from capture: \(windowsToExclude.map { $0.windowID })")
+                }
+            } catch {
+                print("⚠️ Could not resolve excluded windows: \(error)")
+            }
+        }
+
         // Create content filter
         let contentFilter: SCContentFilter
         if let scWindow = pickedWindow {
@@ -144,11 +160,11 @@ class ScreenRecorder: NSObject, ObservableObject {
             print("🎯 Recording window \(scWindow.windowID) \"\(title)\" (\(appName)): \(Int(f.width))x\(Int(f.height)) pts")
         } else if let customRect = workingSettings.region.rect {
             // Custom region recording
-            contentFilter = SCContentFilter(display: display, excludingWindows: [])
+            contentFilter = SCContentFilter(display: display, excludingWindows: windowsToExclude)
             print("🎯 Recording custom region: \(customRect)")
         } else {
             // Full screen recording
-            contentFilter = SCContentFilter(display: display, excludingWindows: [])
+            contentFilter = SCContentFilter(display: display, excludingWindows: windowsToExclude)
             print("🎯 Recording full display: \(display.width)x\(display.height)")
         }
 
