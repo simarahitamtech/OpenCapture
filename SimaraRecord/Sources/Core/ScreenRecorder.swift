@@ -215,22 +215,25 @@ class ScreenRecorder: NSObject, ObservableObject {
 
         if let scWindow = pickedWindow {
             // Display + sourceRect window-capture path.
-            // - sourceRect: window's screen frame (top-down points), clamped to display.
-            // - width/height: locked at recording start to 1.5× initial window pixels
-            //   (clamped to display) so the user can resize 50% bigger without re-encode.
-            //   Aspect-mismatched frames are letterboxed inside the buffer via scalesToFit.
+            // - sourceRect: window's screen frame (top-down POINTS), clamped to display.
+            //   IMPORTANT: SCDisplay.width/height is in POINTS, not pixels.
+            // - width/height: output buffer in PIXELS, fixed at the initial window
+            //   pixel dimensions (no growth-headroom multiplier). On resize/move
+            //   the sourceRect changes but the buffer stays — content is letterboxed
+            //   inside the buffer via scalesToFit when aspect differs.
             let displayRectPts = CGRect(
                 x: 0, y: 0,
-                width: CGFloat(display.width) / backingScale,
-                height: CGFloat(display.height) / backingScale
+                width: CGFloat(display.width),       // SCDisplay is points
+                height: CGFloat(display.height)
             )
             let initialSourceRect = scWindow.frame.intersection(displayRectPts)
             let initialPxW = max(2, Int((initialSourceRect.width * backingScale).rounded(.down)))
             let initialPxH = max(2, Int((initialSourceRect.height * backingScale).rounded(.down)))
-            let bufferPxW = max(2, min(Int(display.width), Int(Double(initialPxW) * 1.5)))
-            let bufferPxH = max(2, min(Int(display.height), Int(Double(initialPxH) * 1.5)))
-            let evenPixelWidth = (bufferPxW / 2) * 2
-            let evenPixelHeight = (bufferPxH / 2) * 2
+            // Lock buffer at the initial pixel size — sourceRect can change to
+            // any sub-region; SCK will scale-to-fit. No upscaling artifacts since
+            // the window's content quality matches its captured pixels exactly.
+            let evenPixelWidth = (initialPxW / 2) * 2
+            let evenPixelHeight = (initialPxH / 2) * 2
 
             streamConfig.sourceRect = initialSourceRect
             streamConfig.width = evenPixelWidth
