@@ -29,6 +29,28 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var settings: RecordingSettings?
     private var recordingStartTime: Date?
 
+    // MARK: - Window-Capture Mode State (display + dynamic sourceRect)
+
+    /// A timestamped record of where the captured window's screen frame was
+    /// during recording. Surface in `consumeWindowFrameEvents()` for the Pro
+    /// layer to persist into RecordingMetadata.
+    public struct WindowFrameEventInternal {
+        public let timestamp: TimeInterval  // seconds since recordingStartTime (paused-duration-adjusted)
+        public let frame: CGRect            // bottom-up screen points
+    }
+
+    private var windowCaptureWindowID: CGWindowID?
+    private var windowCaptureDisplay: SCDisplay?
+    private var windowCaptureBackingScale: CGFloat = 1.0
+    private var windowCaptureBufferWidthPx: Int = 0
+    private var windowCaptureBufferHeightPx: Int = 0
+    private var windowCaptureLastAppliedFrame: CGRect = .zero
+    private var windowCaptureBaseConfig: SCStreamConfiguration?
+    private var windowFramePollTimer: Timer?
+    private var windowFrameUpdateInFlight = false
+    private var windowFrameEvents: [WindowFrameEventInternal] = []
+    private let windowFrameEventsLock = NSLock()
+
     // MARK: - Initialization
 
     override init() {
@@ -100,6 +122,18 @@ class ScreenRecorder: NSObject, ObservableObject {
             throw RecorderError.invalidState
         }
 
+        // Reset window-capture state for the new session.
+        windowCaptureWindowID = nil
+        windowCaptureDisplay = nil
+        windowCaptureBaseConfig = nil
+        windowCaptureBufferWidthPx = 0
+        windowCaptureBufferHeightPx = 0
+        windowCaptureLastAppliedFrame = .zero
+        windowFrameUpdateInFlight = false
+        windowFrameEventsLock.lock()
+        windowFrameEvents.removeAll()
+        windowFrameEventsLock.unlock()
+
         // Fetch displays — this also verifies permission at runtime.
         // SCShareableContent is the true permission check; CGPreflight can be stale.
         await updateAvailableDisplays()
@@ -151,13 +185,16 @@ class ScreenRecorder: NSObject, ObservableObject {
         // Create content filter
         let contentFilter: SCContentFilter
         if let scWindow = pickedWindow {
-            // Window capture: produces a stream of just this window, independent
-            // of its on-screen position. Width/height come from the window itself.
-            contentFilter = SCContentFilter(desktopIndependentWindow: scWindow)
+            // Window capture via display + sourceRect (NOT desktopIndependentWindow).
+            // Display capture delivers steady frames as long as anything on the
+            // display changes (cursor counts), fixing the jerky playback inherent
+            // to change-driven window capture. We track the window's frame in
+            // real time and update sourceRect via SCStream.updateConfiguration.
+            contentFilter = SCContentFilter(display: display, excludingWindows: windowsToExclude)
             let f = scWindow.frame
             let title = scWindow.title ?? ""
             let appName = scWindow.owningApplication?.applicationName ?? "?"
-            print("🎯 Recording window \(scWindow.windowID) \"\(title)\" (\(appName)): \(Int(f.width))x\(Int(f.height)) pts")
+            print("🎯 Recording window \(scWindow.windowID) \"\(title)\" (\(appName)): \(Int(f.width))x\(Int(f.height)) pts (via display+sourceRect)")
         } else if let customRect = workingSettings.region.rect {
             // Custom region recording
             contentFilter = SCContentFilter(display: display, excludingWindows: windowsToExclude)
@@ -177,19 +214,40 @@ class ScreenRecorder: NSObject, ObservableObject {
         let screenFramePoints = screenFrameInPoints(for: display)
 
         if let scWindow = pickedWindow {
-            // For desktopIndependentWindow capture, SCContentFilter already
-            // constrains the capture to the window — we MUST NOT set a
-            // sourceRect (that's a display-space concept). Only size the
-            // output buffer based on the window's pixel dimensions.
-            let windowWidthPts = scWindow.frame.width
-            let windowHeightPts = scWindow.frame.height
-            let pixelWidth = max(2, Int((windowWidthPts * backingScale).rounded(.down)))
-            let pixelHeight = max(2, Int((windowHeightPts * backingScale).rounded(.down)))
-            let evenPixelWidth = (pixelWidth / 2) * 2
-            let evenPixelHeight = (pixelHeight / 2) * 2
+            // Display + sourceRect window-capture path.
+            // - sourceRect: window's screen frame (top-down points), clamped to display.
+            // - width/height: locked at recording start to 1.5× initial window pixels
+            //   (clamped to display) so the user can resize 50% bigger without re-encode.
+            //   Aspect-mismatched frames are letterboxed inside the buffer via scalesToFit.
+            let displayRectPts = CGRect(
+                x: 0, y: 0,
+                width: CGFloat(display.width) / backingScale,
+                height: CGFloat(display.height) / backingScale
+            )
+            let initialSourceRect = scWindow.frame.intersection(displayRectPts)
+            let initialPxW = max(2, Int((initialSourceRect.width * backingScale).rounded(.down)))
+            let initialPxH = max(2, Int((initialSourceRect.height * backingScale).rounded(.down)))
+            let bufferPxW = max(2, min(Int(display.width), Int(Double(initialPxW) * 1.5)))
+            let bufferPxH = max(2, min(Int(display.height), Int(Double(initialPxH) * 1.5)))
+            let evenPixelWidth = (bufferPxW / 2) * 2
+            let evenPixelHeight = (bufferPxH / 2) * 2
+
+            streamConfig.sourceRect = initialSourceRect
             streamConfig.width = evenPixelWidth
             streamConfig.height = evenPixelHeight
-            print("🎯 Window capture size (pixels): \(evenPixelWidth)x\(evenPixelHeight), scale: \(backingScale)")
+            if #available(macOS 14.0, *) {
+                streamConfig.scalesToFit = true  // letterbox aspect mismatch inside the buffer
+            }
+
+            // Cache for the window-frame polling loop
+            self.windowCaptureWindowID = scWindow.windowID
+            self.windowCaptureDisplay = display
+            self.windowCaptureBackingScale = backingScale
+            self.windowCaptureBufferWidthPx = evenPixelWidth
+            self.windowCaptureBufferHeightPx = evenPixelHeight
+            self.windowCaptureLastAppliedFrame = initialSourceRect
+
+            print("🎯 Window capture buffer (pixels): \(evenPixelWidth)x\(evenPixelHeight), initial sourceRect: \(initialSourceRect), scale: \(backingScale)")
         } else if let rectPoints = workingSettings.region.rect?.standardized {
             // Clamp to screen bounds (points)
             let clampedPoints = rectPoints.intersection(screenFramePoints)
@@ -233,12 +291,19 @@ class ScreenRecorder: NSObject, ObservableObject {
         streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(workingSettings.frameRate.rawValue))
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfig.showsCursor = true
+        streamConfig.queueDepth = 8  // absorb compositor stalls; default 3 is tight under load
 
         // Audio configuration
         if settings.audioSettings.systemAudioEnabled {
             streamConfig.capturesAudio = true
             streamConfig.sampleRate = 44100
             streamConfig.channelCount = 2
+        }
+
+        // Window-capture mode: cache the base config for the polling loop.
+        // updateConfiguration replaces the entire config, so we need all fields handy.
+        if pickedWindow != nil {
+            self.windowCaptureBaseConfig = streamConfig
         }
 
         // Create video writer
@@ -277,6 +342,10 @@ class ScreenRecorder: NSObject, ObservableObject {
             self.recordingStartTime = Date()
             self.state = .recording(startTime: Date(), isPaused: false)
 
+            // Start the window-frame polling loop for window-capture mode.
+            // No-op when windowCaptureWindowID is nil.
+            self.startWindowFramePolling()
+
             print("✅ Recording started")
             print("   Output: \(settings.outputURL.path)")
             print("   Resolution: \(streamConfig.width)x\(streamConfig.height)")
@@ -300,6 +369,10 @@ class ScreenRecorder: NSObject, ObservableObject {
         // Pause microphone capture
         micCaptureSession?.stopRunning()
 
+        // Pause window-frame polling so we don't issue updateConfiguration
+        // while paused (no frames in flight to apply against).
+        stopWindowFramePolling()
+
         self.state = .recording(startTime: startTime, isPaused: true)
         print("⏸ Recording paused")
     }
@@ -312,6 +385,9 @@ class ScreenRecorder: NSObject, ObservableObject {
 
         // Resume microphone capture
         micCaptureSession?.startRunning()
+
+        // Resume window-frame polling
+        startWindowFramePolling()
 
         self.state = .recording(startTime: startTime, isPaused: false)
         print("▶️ Recording resumed")
@@ -333,6 +409,9 @@ class ScreenRecorder: NSObject, ObservableObject {
         guard let stream = stream, let writer = videoWriter else {
             throw RecorderError.notRecording
         }
+
+        // Stop the window-frame polling loop (no-op outside window-capture mode)
+        stopWindowFramePolling()
 
         // Stop microphone capture
         stopMicrophoneCapture()
@@ -367,6 +446,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     func cancelRecording() async {
         guard case .recording = state else { return }
 
+        stopWindowFramePolling()
         stopMicrophoneCapture()
 
         if let stream = stream {
@@ -469,6 +549,127 @@ class ScreenRecorder: NSObject, ObservableObject {
         micCaptureSession = nil
         micAudioOutput = nil
         micAudioConnection = nil
+    }
+
+    // MARK: - Window-Capture Polling (dynamic sourceRect)
+
+    /// Starts polling the captured window's screen frame at 15 Hz and updating
+    /// the SCStream's sourceRect when it changes. No-op outside window-capture mode.
+    private func startWindowFramePolling() {
+        guard windowCaptureWindowID != nil else { return }
+        windowFramePollTimer?.invalidate()
+        windowFramePollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollWindowFrame() }
+        }
+    }
+
+    /// Tears down the window-frame polling Timer.
+    private func stopWindowFramePolling() {
+        windowFramePollTimer?.invalidate()
+        windowFramePollTimer = nil
+    }
+
+    /// Reads the current window frame via CGWindowList (fast, synchronous) and
+    /// triggers an updateConfiguration when it differs > 0.5 pt from last applied.
+    @MainActor
+    private func pollWindowFrame() {
+        guard let stream = self.stream,
+              let windowID = self.windowCaptureWindowID,
+              !self.windowFrameUpdateInFlight,
+              !(self.videoWriter?.isPaused ?? true) else { return }
+
+        guard let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
+              let first = info.first,
+              let bounds = first[kCGWindowBounds as String] as? [String: CGFloat],
+              let x = bounds["X"], let y = bounds["Y"],
+              let w = bounds["Width"], let h = bounds["Height"],
+              w > 0, h > 0
+        else { return }
+
+        let topDown = CGRect(x: x, y: y, width: w, height: h)
+        let last = self.windowCaptureLastAppliedFrame
+        if abs(topDown.minX - last.minX) < 0.5,
+           abs(topDown.minY - last.minY) < 0.5,
+           abs(topDown.width - last.width) < 0.5,
+           abs(topDown.height - last.height) < 0.5 { return }
+
+        self.applyWindowFrameUpdate(topDownFrame: topDown, stream: stream)
+    }
+
+    /// Issues SCStream.updateConfiguration with the new sourceRect. Logs the
+    /// applied frame as a time-series event on success (paused-adjusted timestamp).
+    @MainActor
+    private func applyWindowFrameUpdate(topDownFrame: CGRect, stream: SCStream) {
+        guard let display = windowCaptureDisplay,
+              let base = windowCaptureBaseConfig else { return }
+
+        let displayRect = CGRect(
+            x: 0, y: 0,
+            width: CGFloat(display.width) / windowCaptureBackingScale,
+            height: CGFloat(display.height) / windowCaptureBackingScale
+        )
+        let clamped = topDownFrame.intersection(displayRect)
+        guard !clamped.isEmpty, clamped.width >= 2, clamped.height >= 2 else { return }
+
+        // updateConfiguration replaces the entire config — clone the base and
+        // only modify sourceRect. width/height MUST stay fixed (encoder locked).
+        let newConfig = SCStreamConfiguration()
+        newConfig.sourceRect = clamped
+        newConfig.width = windowCaptureBufferWidthPx
+        newConfig.height = windowCaptureBufferHeightPx
+        newConfig.minimumFrameInterval = base.minimumFrameInterval
+        newConfig.pixelFormat = base.pixelFormat
+        newConfig.showsCursor = base.showsCursor
+        newConfig.capturesAudio = base.capturesAudio
+        newConfig.sampleRate = base.sampleRate
+        newConfig.channelCount = base.channelCount
+        newConfig.queueDepth = base.queueDepth
+        if #available(macOS 14.0, *) { newConfig.scalesToFit = true }
+
+        windowFrameUpdateInFlight = true
+        stream.updateConfiguration(newConfig) { [weak self] error in
+            Task { @MainActor in
+                guard let self else { return }
+                self.windowFrameUpdateInFlight = false
+                if let error {
+                    print("⚠️ SCStream.updateConfiguration failed: \(error.localizedDescription)")
+                    return
+                }
+                self.windowCaptureLastAppliedFrame = topDownFrame
+
+                // Stamp the event with the paused-duration-adjusted timestamp.
+                guard let start = self.recordingStartTime else { return }
+                let elapsed = Date().timeIntervalSince(start)
+                let pausedSec = self.videoWriter?.totalPausedSeconds ?? 0
+                let adjustedTimestamp = max(0, elapsed - pausedSec)
+
+                // Convert top-down → bottom-up for the Pro layer's compositor.
+                let displayH = CGFloat(display.height) / self.windowCaptureBackingScale
+                let bottomUp = CGRect(
+                    x: topDownFrame.origin.x,
+                    y: displayH - topDownFrame.origin.y - topDownFrame.size.height,
+                    width: topDownFrame.size.width,
+                    height: topDownFrame.size.height
+                )
+
+                self.windowFrameEventsLock.lock()
+                self.windowFrameEvents.append(WindowFrameEventInternal(
+                    timestamp: adjustedTimestamp,
+                    frame: bottomUp
+                ))
+                self.windowFrameEventsLock.unlock()
+            }
+        }
+    }
+
+    /// Drains the collected window-frame events. Called by the Pro layer after
+    /// stopRecording so they can be persisted into RecordingMetadata.
+    func consumeWindowFrameEvents() -> [WindowFrameEventInternal] {
+        windowFrameEventsLock.lock()
+        defer { windowFrameEventsLock.unlock() }
+        let events = windowFrameEvents
+        windowFrameEvents = []
+        return events
     }
 }
 

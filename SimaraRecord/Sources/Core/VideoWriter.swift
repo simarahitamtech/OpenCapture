@@ -34,6 +34,11 @@ class VideoWriter {
     private var pauseStartTime: CMTime = .zero
     private var totalPausedDuration: CMTime = .zero
 
+    /// Read-only accessor for paused duration (seconds). Used by the recorder
+    /// to stamp window-frame events with paused-adjusted timestamps so they
+    /// align with the video track timeline.
+    var totalPausedSeconds: Double { CMTimeGetSeconds(totalPausedDuration) }
+
     init(outputURL: URL, width: Int, height: Int, frameRate: Int, bitrate: Int) throws {
         self.outputURL = outputURL
 
