@@ -26,6 +26,12 @@ class VideoWriter {
     private var sessionStartTime: CMTime = .zero
     private var hasStartedSession = false
 
+    /// Cached pixel buffer from the last `.complete` SCStream frame. Used to
+    /// fill in idle frames that don't carry their own buffer, so the encoder
+    /// keeps receiving frames at the target rate even when the screen is
+    /// momentarily unchanged.
+    private var lastCompletePixelBuffer: CVPixelBuffer?
+
     // Serial queue to prevent concurrent audio appends from mic + system audio
     private let audioAppendQueue = DispatchQueue(label: "com.simararecord.audioAppend")
 
@@ -175,21 +181,46 @@ class VideoWriter {
         guard let videoInput = videoInput, videoInput.isReadyForMoreMediaData else { return }
         guard let adaptor = pixelBufferAdaptor else { return }
 
-        // ScreenCaptureKit sends status-only buffers (e.g. idle frames) — skip them
+        // Read SCStream frame status. We treat .complete and .idle the same:
+        // both carry valid pixels. Without this, capturing a window on an
+        // external HDMI display (where the system marks ~50% of frames idle
+        // because the display compositor reports no change) silently halves
+        // the recording's frame rate. See diagnostic logs in ScreenRecorder
+        // — Mac mini demo mode dropped from 60 fps to ~27 fps because every
+        // idle frame was dropped here.
         guard let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let attachments = attachmentsArray.first else {
             return
         }
+        let status: SCFrameStatus? = {
+            if let raw = attachments[SCStreamFrameInfo.status] as? Int {
+                return SCFrameStatus(rawValue: raw)
+            }
+            return nil
+        }()
 
-        guard let statusRawValue = attachments[SCStreamFrameInfo.status] as? Int,
-              let status = SCFrameStatus(rawValue: statusRawValue),
-              status == .complete else {
+        // Skip frames that genuinely carry no image (suspended / stopped / blank /
+        // started). For idle frames the pixel buffer is the same as the last
+        // delivered .complete frame — perfectly fine to write.
+        switch status {
+        case .complete, .idle:
+            break
+        default:
             return
         }
 
-        // Extract the pixel buffer from the sample buffer
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+        // Idle frames sometimes carry a pixel buffer (a snapshot of the last
+        // unchanged screen) and sometimes don't. When the buffer is missing,
+        // fall back to repeating the most recent complete buffer so the
+        // output frame rate stays smooth instead of stalling.
+        let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) ?? lastCompletePixelBuffer
+        guard let pixelBuffer = imageBuffer else {
+            // No image and no previous frame to repeat — bail. Happens at the
+            // very start before any complete frame has arrived.
             return
+        }
+        if status == .complete {
+            lastCompletePixelBuffer = pixelBuffer
         }
 
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
