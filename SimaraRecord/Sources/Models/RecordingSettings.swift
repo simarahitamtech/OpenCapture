@@ -85,10 +85,16 @@ enum VideoQuality: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var bitrate: Int {
+        // Pro screen recorders (Screen Studio, ScreenFlow) target 10–15 Mbps
+        // for 1080p screen content because text + colored UI surfaces don't
+        // compress as easily as natural video — H.264 needs the headroom to
+        // preserve sharp edges through 4:2:0 chroma subsampling. Bumped from
+        // 8/4/2 Mbps to give the encoder room to actually produce crisp
+        // recordings.
         switch self {
-        case .high: return 8_000_000    // 8 Mbps
-        case .medium: return 4_000_000  // 4 Mbps
-        case .low: return 2_000_000     // 2 Mbps
+        case .high: return 16_000_000   // 16 Mbps
+        case .medium: return 8_000_000  // 8 Mbps
+        case .low: return 3_000_000     // 3 Mbps
         }
     }
 
