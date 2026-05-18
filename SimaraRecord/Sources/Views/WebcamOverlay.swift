@@ -48,6 +48,11 @@ class WebcamPiPView: NSView {
     private var processedLayer: CALayer?
     private var shape: WebcamShape
 
+    /// Current webcam shape (exposed for metadata capture)
+    var currentShape: WebcamShape {
+        return shape
+    }
+
     init(previewLayer: AVCaptureVideoPreviewLayer, processedLayer: CALayer? = nil, shape: WebcamShape = .circle) {
         self.previewLayer = previewLayer
         self.processedLayer = processedLayer

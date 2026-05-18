@@ -28,11 +28,15 @@ class WebcamManager: ObservableObject {
     private var videoDataOutput: AVCaptureVideoDataOutput?
     private var blurProcessor: BackgroundBlurProcessor?
     private var delegateAdapter: VideoOutputDelegateAdapter?
+    private var frameCaptureDelegate: FrameCaptureDelegate?
     private let videoOutputQueue = DispatchQueue(
         label: "com.opencapture.webcamVideoOutput",
         qos: .userInteractive
     )
     private(set) var processedFrameLayer: CALayer?
+
+    // Frame capture callback (for recording webcam to separate file)
+    var onFrameCaptured: ((CMSampleBuffer) -> Void)?
 
     init() {
         updateAvailableCameras()
@@ -126,7 +130,7 @@ class WebcamManager: ObservableObject {
             }
             session.addInput(input)
 
-            // Add video data output for background blur (no delegate until blur is enabled)
+            // Add video data output for background blur and frame capture
             let dataOutput = AVCaptureVideoDataOutput()
             dataOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -135,6 +139,14 @@ class WebcamManager: ObservableObject {
             if session.canAddOutput(dataOutput) {
                 session.addOutput(dataOutput)
                 self.videoDataOutput = dataOutput
+
+                // Set up frame capture delegate (always active for recording)
+                let captureDelegate = FrameCaptureDelegate()
+                captureDelegate.onFrameCaptured = { [weak self] sampleBuffer in
+                    self?.onFrameCaptured?(sampleBuffer)
+                }
+                self.frameCaptureDelegate = captureDelegate
+                dataOutput.setSampleBufferDelegate(captureDelegate, queue: videoOutputQueue)
             }
 
             session.commitConfiguration()
@@ -217,6 +229,9 @@ class WebcamManager: ObservableObject {
         self.blurProcessor = processor
 
         let adapter = VideoOutputDelegateAdapter(processor: processor)
+        adapter.onFrameCaptured = { [weak self] sampleBuffer in
+            self?.onFrameCaptured?(sampleBuffer)
+        }
         self.delegateAdapter = adapter
         dataOutput.setSampleBufferDelegate(adapter, queue: videoOutputQueue)
 
@@ -232,7 +247,14 @@ class WebcamManager: ObservableObject {
 
     func disableBackgroundBlur() {
         print("🔵 disableBackgroundBlur called")
-        videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
+
+        // Switch back to frame capture delegate (for recording)
+        if let captureDelegate = frameCaptureDelegate {
+            videoDataOutput?.setSampleBufferDelegate(captureDelegate, queue: videoOutputQueue)
+        } else {
+            videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
+        }
+
         blurProcessor?.stop()
         blurProcessor = nil
         delegateAdapter = nil
@@ -356,6 +378,7 @@ class WebcamManager: ObservableObject {
 /// which delivers callbacks on arbitrary queues.
 class VideoOutputDelegateAdapter: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let processor: BackgroundBlurProcessor
+    var onFrameCaptured: ((CMSampleBuffer) -> Void)?
 
     init(processor: BackgroundBlurProcessor) {
         self.processor = processor
@@ -368,6 +391,24 @@ class VideoOutputDelegateAdapter: NSObject, AVCaptureVideoDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         processor.processFrame(sampleBuffer)
+
+        // Also send frame to recording coordinator for webcam capture
+        onFrameCaptured?(sampleBuffer)
+    }
+}
+
+// MARK: - Frame Capture Delegate
+
+/// Simple delegate that only captures frames (no processing)
+class FrameCaptureDelegate: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    var onFrameCaptured: ((CMSampleBuffer) -> Void)?
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        onFrameCaptured?(sampleBuffer)
     }
 }
 

@@ -217,6 +217,43 @@ class SilenceRemover {
         )
     }
 
+    /// Process a video keeping only the supplied segments (skipping internal analysis).
+    func process(
+        inputURL: URL,
+        outputURL: URL,
+        keepingSegments speechSegments: [Segment],
+        progress: ((Double) -> Void)? = nil
+    ) async throws -> Result {
+        guard !speechSegments.isEmpty else {
+            throw Error.noSpeechDetected
+        }
+
+        let asset = AVAsset(url: inputURL)
+        let duration = try await asset.load(.duration)
+        let originalDuration = CMTimeGetSeconds(duration)
+
+        let composition = try await createComposition(
+            from: asset,
+            keepingSegments: speechSegments
+        )
+
+        let newDuration = speechSegments.reduce(0.0) { $0 + $1.duration }
+
+        try await exportComposition(
+            composition,
+            to: outputURL,
+            progress: progress
+        )
+
+        let silenceRemoved = originalDuration - newDuration
+        return Result(
+            originalDuration: originalDuration,
+            newDuration: newDuration,
+            silenceRemoved: silenceRemoved,
+            segmentsRemoved: 0
+        )
+    }
+
     // MARK: - Audio Analysis
 
     /// Analyzes audio track and returns amplitude (in dB) for each chunk
