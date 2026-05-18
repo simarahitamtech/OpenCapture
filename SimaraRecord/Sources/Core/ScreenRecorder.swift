@@ -46,10 +46,31 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var windowCaptureBufferHeightPx: Int = 0
     private var windowCaptureLastAppliedFrame: CGRect = .zero
     private var windowCaptureBaseConfig: SCStreamConfiguration?
-    private var windowFramePollTimer: Timer?
-    private var windowFrameUpdateInFlight = false
+
+    /// Background dispatch timer for window-frame polling. Lives on
+    /// `windowFramePollQueue` so the cheap `CGWindowListCopyWindowInfo` query
+    /// plus the change-detection guard never touch the main thread. Only when
+    /// an actual change is detected do we hop to main to issue
+    /// `SCStream.updateConfiguration`. This matters because on machines under
+    /// display-compositing pressure (e.g. an HDMI-attached TV), main-thread
+    /// hops at 15 Hz can serialize behind SCStream's frame delivery and stall
+    /// captured frames for hundreds of ms — observed on a Mac mini driving a
+    /// 27" 1080p TV where the demo-mode capture path dropped from 60 fps to
+    /// 31 fps with ~1 s stalls.
+    private var windowFramePollTimer: DispatchSourceTimer?
+    private let windowFramePollQueue = DispatchQueue(label: "com.simararecord.windowframe.poll", qos: .userInitiated)
+    private let windowFrameStateLock = NSLock()
+    private var windowFrameUpdateInFlight = false                  // guarded by windowFrameStateLock
+    private var windowFrameLastChangeTime: CFTimeInterval = 0      // guarded by windowFrameStateLock
+    private var windowFramePollActiveRate = true                   // guarded by windowFrameStateLock
     private var windowFrameEvents: [WindowFrameEventInternal] = []
     private let windowFrameEventsLock = NSLock()
+
+    /// While motion is recent (≤ this many seconds ago), poll at 15 Hz.
+    /// Beyond that window with no detected change, drop to 2 Hz.
+    private static let windowFrameActiveWindow: CFTimeInterval = 3.0
+    private static let windowFrameActiveInterval: TimeInterval = 1.0 / 15.0
+    private static let windowFrameIdleInterval: TimeInterval = 0.5
 
     // MARK: - Initialization
 
@@ -556,47 +577,127 @@ class ScreenRecorder: NSObject, ObservableObject {
 
     // MARK: - Window-Capture Polling (dynamic sourceRect)
 
-    /// Starts polling the captured window's screen frame at 15 Hz and updating
-    /// the SCStream's sourceRect when it changes. No-op outside window-capture mode.
+    /// Starts polling the captured window's screen frame and updating the
+    /// SCStream's sourceRect when it changes. Runs entirely on a background
+    /// queue (`windowFramePollQueue`) — only the actual
+    /// `stream.updateConfiguration` call hops to main. No-op outside
+    /// window-capture mode.
     private func startWindowFramePolling() {
         guard windowCaptureWindowID != nil else { return }
-        windowFramePollTimer?.invalidate()
-        windowFramePollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollWindowFrame() }
+        windowFramePollTimer?.cancel()
+
+        windowFrameStateLock.lock()
+        windowFrameLastChangeTime = CACurrentMediaTime()
+        windowFramePollActiveRate = true
+        windowFrameStateLock.unlock()
+
+        let timer = DispatchSource.makeTimerSource(queue: windowFramePollQueue)
+        timer.schedule(deadline: .now() + Self.windowFrameActiveInterval,
+                       repeating: Self.windowFrameActiveInterval)
+        timer.setEventHandler { [weak self] in
+            self?.pollWindowFrameOnBackgroundQueue()
         }
+        windowFramePollTimer = timer
+        timer.resume()
     }
 
-    /// Tears down the window-frame polling Timer.
+    /// Tears down the window-frame polling timer.
     private func stopWindowFramePolling() {
-        windowFramePollTimer?.invalidate()
+        windowFramePollTimer?.cancel()
         windowFramePollTimer = nil
     }
 
-    /// Reads the current window frame via CGWindowList (fast, synchronous) and
-    /// triggers an updateConfiguration when it differs > 0.5 pt from last applied.
-    @MainActor
-    private func pollWindowFrame() {
-        guard let stream = self.stream,
-              let windowID = self.windowCaptureWindowID,
-              !self.windowFrameUpdateInFlight,
-              !(self.videoWriter?.isPaused ?? true) else { return }
+    /// Background-queue poll: reads the window's current bounds via
+    /// `CGWindowListCopyWindowInfo` (thread-safe), dedupes against the last
+    /// applied frame, and only hops to main when there's actually a change
+    /// to apply. Also throttles to 2 Hz when no motion has been seen for
+    /// `windowFrameActiveWindow` seconds — typical static demos pay almost
+    /// no polling cost while a window drag still gets snappy 15 Hz tracking.
+    private func pollWindowFrameOnBackgroundQueue() {
+        guard let windowID = self.windowCaptureWindowID else { return }
 
+        windowFrameStateLock.lock()
+        let inFlight = windowFrameUpdateInFlight
+        let lastChange = windowFrameLastChangeTime
+        let activeRate = windowFramePollActiveRate
+        windowFrameStateLock.unlock()
+
+        if inFlight { return }
+
+        // CGWindowListCopyWindowInfo is CG-level and thread-safe; calling it
+        // off-main avoids serializing behind WindowServer + SCStream notifs
+        // that contend for main-thread time on machines driving external
+        // displays.
         guard let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
               let first = info.first,
               let bounds = first[kCGWindowBounds as String] as? [String: CGFloat],
               let x = bounds["X"], let y = bounds["Y"],
               let w = bounds["Width"], let h = bounds["Height"],
               w > 0, h > 0
-        else { return }
+        else {
+            // Window not enumerable (minimized, hidden) — treat as idle.
+            maybeSwitchPollRate(activeRate: activeRate, now: CACurrentMediaTime(), lastChange: lastChange)
+            return
+        }
 
         let topDown = CGRect(x: x, y: y, width: w, height: h)
         let last = self.windowCaptureLastAppliedFrame
-        if abs(topDown.minX - last.minX) < 0.5,
-           abs(topDown.minY - last.minY) < 0.5,
-           abs(topDown.width - last.width) < 0.5,
-           abs(topDown.height - last.height) < 0.5 { return }
+        let unchanged = abs(topDown.minX - last.minX) < 0.5 &&
+                        abs(topDown.minY - last.minY) < 0.5 &&
+                        abs(topDown.width - last.width) < 0.5 &&
+                        abs(topDown.height - last.height) < 0.5
 
-        self.applyWindowFrameUpdate(topDownFrame: topDown, stream: stream)
+        let now = CACurrentMediaTime()
+        if unchanged {
+            maybeSwitchPollRate(activeRate: activeRate, now: now, lastChange: lastChange)
+            return
+        }
+
+        // Change detected — bump activity and queue the configuration update
+        // on main. videoWriter access requires main-thread treatment in the
+        // pause-check, so we defer the full applyWindowFrameUpdate hop there.
+        windowFrameStateLock.lock()
+        windowFrameLastChangeTime = now
+        if !windowFramePollActiveRate {
+            windowFramePollActiveRate = true
+            rescheduleTimerLocked(interval: Self.windowFrameActiveInterval)
+        }
+        windowFrameUpdateInFlight = true
+        windowFrameStateLock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  let stream = self.stream,
+                  !(self.videoWriter?.isPaused ?? true) else {
+                self?.windowFrameStateLock.lock()
+                self?.windowFrameUpdateInFlight = false
+                self?.windowFrameStateLock.unlock()
+                return
+            }
+            self.applyWindowFrameUpdate(topDownFrame: topDown, stream: stream)
+        }
+    }
+
+    /// Switches the poll cadence between active (15 Hz) and idle (2 Hz) based
+    /// on whether the window has changed recently. Caller is on the poll
+    /// queue and has already loaded `activeRate` / `lastChange` outside the lock.
+    private func maybeSwitchPollRate(activeRate: Bool, now: CFTimeInterval, lastChange: CFTimeInterval) {
+        let idleFor = now - lastChange
+        if activeRate && idleFor > Self.windowFrameActiveWindow {
+            windowFrameStateLock.lock()
+            // Re-check after lock — another thread may have flipped state.
+            if windowFramePollActiveRate && (now - windowFrameLastChangeTime) > Self.windowFrameActiveWindow {
+                windowFramePollActiveRate = false
+                rescheduleTimerLocked(interval: Self.windowFrameIdleInterval)
+            }
+            windowFrameStateLock.unlock()
+        }
+    }
+
+    /// Updates the dispatch timer interval. Caller must hold `windowFrameStateLock`.
+    private func rescheduleTimerLocked(interval: TimeInterval) {
+        guard let timer = windowFramePollTimer else { return }
+        timer.schedule(deadline: .now() + interval, repeating: interval)
     }
 
     /// Issues SCStream.updateConfiguration with the new sourceRect. Logs the
@@ -604,7 +705,12 @@ class ScreenRecorder: NSObject, ObservableObject {
     @MainActor
     private func applyWindowFrameUpdate(topDownFrame: CGRect, stream: SCStream) {
         guard let display = windowCaptureDisplay,
-              let base = windowCaptureBaseConfig else { return }
+              let base = windowCaptureBaseConfig else {
+            windowFrameStateLock.lock()
+            windowFrameUpdateInFlight = false
+            windowFrameStateLock.unlock()
+            return
+        }
 
         let displayRect = CGRect(
             x: 0, y: 0,
@@ -612,7 +718,14 @@ class ScreenRecorder: NSObject, ObservableObject {
             height: CGFloat(display.height) / windowCaptureBackingScale
         )
         let clamped = topDownFrame.intersection(displayRect)
-        guard !clamped.isEmpty, clamped.width >= 2, clamped.height >= 2 else { return }
+        guard !clamped.isEmpty, clamped.width >= 2, clamped.height >= 2 else {
+            // Nothing to apply — release the in-flight flag so the next poll
+            // can proceed.
+            windowFrameStateLock.lock()
+            windowFrameUpdateInFlight = false
+            windowFrameStateLock.unlock()
+            return
+        }
 
         // updateConfiguration replaces the entire config — clone the base and
         // only modify sourceRect. width/height MUST stay fixed (encoder locked).
@@ -629,11 +742,14 @@ class ScreenRecorder: NSObject, ObservableObject {
         newConfig.queueDepth = base.queueDepth
         if #available(macOS 14.0, *) { newConfig.scalesToFit = true }
 
-        windowFrameUpdateInFlight = true
+        // windowFrameUpdateInFlight was set true by the poll before hopping
+        // to main; reset it in the completion handler.
         stream.updateConfiguration(newConfig) { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
+                self.windowFrameStateLock.lock()
                 self.windowFrameUpdateInFlight = false
+                self.windowFrameStateLock.unlock()
                 if let error {
                     print("⚠️ SCStream.updateConfiguration failed: \(error.localizedDescription)")
                     return
