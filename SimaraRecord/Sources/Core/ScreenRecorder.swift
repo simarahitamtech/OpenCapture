@@ -248,8 +248,15 @@ class ScreenRecorder: NSObject, ObservableObject {
                 height: CGFloat(display.height)
             )
             let initialSourceRect = scWindow.frame.intersection(displayRectPts)
-            let initialPxW = max(2, Int((initialSourceRect.width * backingScale).rounded(.down)))
-            let initialPxH = max(2, Int((initialSourceRect.height * backingScale).rounded(.down)))
+            // Always capture at >= 2x density so a recording made on a non-Retina
+            // external display (e.g. 1080p HDMI TV at backingScale 1.0) still
+            // looks crisp when viewed on a Retina screen. On Retina displays
+            // (backingScale already 2.0) this is a no-op. SCK supersamples the
+            // captured pixels internally so the resulting buffer is true 2x of
+            // the window's point size.
+            let captureScale = max(backingScale, 2.0)
+            let initialPxW = max(2, Int((initialSourceRect.width * captureScale).rounded(.down)))
+            let initialPxH = max(2, Int((initialSourceRect.height * captureScale).rounded(.down)))
             // Lock buffer at the initial pixel size — sourceRect can change to
             // any sub-region; SCK will scale-to-fit. No upscaling artifacts since
             // the window's content quality matches its captured pixels exactly.
@@ -271,7 +278,7 @@ class ScreenRecorder: NSObject, ObservableObject {
             self.windowCaptureBufferHeightPx = evenPixelHeight
             self.windowCaptureLastAppliedFrame = initialSourceRect
 
-            print("🎯 Window capture buffer (pixels): \(evenPixelWidth)x\(evenPixelHeight), initial sourceRect: \(initialSourceRect), scale: \(backingScale)")
+            print("🎯 Window capture buffer (pixels): \(evenPixelWidth)x\(evenPixelHeight), initial sourceRect: \(initialSourceRect), display scale: \(backingScale), capture scale: \(captureScale)")
         } else if let rectPoints = workingSettings.region.rect?.standardized {
             // Clamp to screen bounds (points)
             let clampedPoints = rectPoints.intersection(screenFramePoints)
