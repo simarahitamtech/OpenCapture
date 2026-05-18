@@ -291,6 +291,7 @@ class AnnotationToolbarWindow: NSPanel {
         self.backgroundColor = .clear
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.isMovableByWindowBackground = true
+        self.sharingType = .none  // Exclude annotation toolbar from screen capture
 
         // Position at bottom-center of screen
         if let screen = NSScreen.main {

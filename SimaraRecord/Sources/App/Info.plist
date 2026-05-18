@@ -10,34 +10,79 @@
     <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <key>CFBundleDisplayName</key>
+    <string>SimaRecord Pro</string>
     <key>CFBundleName</key>
-    <string>$(PRODUCT_NAME)</string>
+    <string>SimaRecord Pro</string>
     <key>CFBundlePackageType</key>
     <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.video</string>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright 2026 OpenCapture. Open source screen recording.</string>
+    <string>Copyright 2026 Simarahitam Technologies. All rights reserved.</string>
 
     <!-- Required Privacy Permissions -->
     <key>NSScreenCaptureUsageDescription</key>
-    <string>OpenCapture needs screen access to record your screen. Your recordings are saved directly to your chosen location - no cloud, no subscriptions.</string>
+    <string>SimaRecord Pro needs screen access to record your screen. Your recordings are saved directly to your chosen location - no cloud, no subscriptions.</string>
 
     <key>NSMicrophoneUsageDescription</key>
-    <string>OpenCapture needs microphone access to record audio with your screen recordings.</string>
+    <string>SimaRecord Pro needs microphone access to record audio with your screen recordings.</string>
 
     <key>NSCameraUsageDescription</key>
-    <string>OpenCapture needs camera access for the webcam overlay during recordings.</string>
+    <string>SimaRecord Pro needs camera access for the webcam overlay during recordings.</string>
 
     <key>NSSystemExtensionUsageDescription</key>
     <string>Required for capturing system audio along with your screen recording.</string>
+
+    <!-- .simarecord project bundle registration -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>SimaRecord Project</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>simarecord</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSTypeIsPackage</key>
+            <true/>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.package</string>
+            </array>
+            <key>UTTypeDescription</key>
+            <string>SimaRecord Project</string>
+            <key>UTTypeIdentifier</key>
+            <string>com.simarecord.project</string>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>simarecord</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>

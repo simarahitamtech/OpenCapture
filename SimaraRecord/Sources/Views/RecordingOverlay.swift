@@ -197,6 +197,7 @@ class RecordingOverlayWindow: NSPanel {
         self.backgroundColor = .clear
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.isMovableByWindowBackground = true
+        self.sharingType = .none  // Exclude from screen capture
 
         // Position in top-right corner
         if let screen = NSScreen.main {
@@ -227,6 +228,7 @@ class CountdownWindow: NSPanel {
         self.backgroundColor = .clear
         self.hasShadow = false
         self.ignoresMouseEvents = true
+        self.sharingType = .none  // Exclude countdown from screen capture
 
         // Center on screen
         if let screen = NSScreen.main {
@@ -347,6 +349,7 @@ class RegionBorderWindow: NSPanel {
         self.hasShadow = false
         self.ignoresMouseEvents = true
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.sharingType = .none  // Exclude red region border from screen capture
 
         let borderView = RegionBorderView(frame: NSRect(origin: .zero, size: expandedRect.size), borderWidth: borderWidth)
         self.contentView = borderView

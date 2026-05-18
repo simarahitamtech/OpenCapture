@@ -94,7 +94,7 @@ class SilenceRemover {
         var errorDescription: String? {
             switch self {
             case .noAudioTrack:
-                return "The video file does not contain an audio track"
+                return "This recording has no audio. Turn off Remove Silence in the post-editor to continue."
             case .failedToReadAudio(let error):
                 return "Failed to read audio: \(error?.localizedDescription ?? "unknown error")"
             case .failedToCreateComposition:

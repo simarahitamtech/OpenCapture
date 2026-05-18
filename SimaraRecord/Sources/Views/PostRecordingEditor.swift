@@ -765,7 +765,13 @@ struct PostRecordingEditor: View {
         let directory = videoURL.deletingLastPathComponent()
         let filename = videoURL.deletingPathExtension().lastPathComponent
         let ext = videoURL.pathExtension
-        return directory.appendingPathComponent("\(filename)\(suffix).\(ext)")
+        let outputURL = directory.appendingPathComponent("\(filename)\(suffix).\(ext)")
+        // Fall back to temp directory if the source directory isn't writable
+        // (sandbox can deny writes to .simarecord bundles in some cases)
+        if FileManager.default.isWritableFile(atPath: directory.path) {
+            return outputURL
+        }
+        return FileManager.default.temporaryDirectory.appendingPathComponent("\(filename)\(suffix).\(ext)")
     }
 
     private func formatDuration(_ seconds: TimeInterval) -> String {
