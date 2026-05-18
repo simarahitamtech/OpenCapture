@@ -818,6 +818,17 @@ private class StreamOutput: NSObject, SCStreamOutput, AVCaptureAudioDataOutputSa
     private var audioSampleCount = 0
     private var micSampleCount = 0
 
+    // Diagnostic counters. Logs a single summary line every ~2 seconds of
+    // wall-clock recording so we can tell whether jerky output comes from
+    // SCStream delivering fewer frames or from the writer dropping them.
+    private var diagStartTime: CFTimeInterval = 0
+    private var diagWindowStart: CFTimeInterval = 0
+    private var diagSCFramesInWindow = 0           // raw delivered by SCStream (incl. idle)
+    private var diagCompleteFramesInWindow = 0     // status == .complete
+    private var diagIdleFramesInWindow = 0         // status != .complete (idle/blank)
+    private var diagLastPTS: Double = -1           // last presentation timestamp seen
+    private var diagBackToBackGaps200: Int = 0     // count of PTS jumps > 200ms in window
+
     // MARK: - SCStreamOutput (screen + system audio)
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
@@ -826,11 +837,50 @@ private class StreamOutput: NSObject, SCStreamOutput, AVCaptureAudioDataOutputSa
         switch outputType {
         case .screen:
             frameCount += 1
+            let now = CACurrentMediaTime()
+
+            // Classify the frame status (matches the gate in
+            // VideoWriter.appendVideoBuffer).
+            var isComplete = false
+            if let arr = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+               let attachments = arr.first,
+               let statusRaw = attachments[SCStreamFrameInfo.status] as? Int,
+               let status = SCFrameStatus(rawValue: statusRaw) {
+                isComplete = (status == .complete)
+            }
+
             if frameCount == 1 {
                 print("🎬 First video frame captured!")
-            } else if frameCount % 60 == 0 {
-                print("📹 Captured \(frameCount) video frames...")
+                diagStartTime = now
+                diagWindowStart = now
+                diagLastPTS = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            } else {
+                let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+                if diagLastPTS >= 0 {
+                    let delta = pts - diagLastPTS
+                    if delta > 0.2 { diagBackToBackGaps200 += 1 }
+                }
+                diagLastPTS = pts
             }
+
+            diagSCFramesInWindow += 1
+            if isComplete { diagCompleteFramesInWindow += 1 } else { diagIdleFramesInWindow += 1 }
+
+            // Emit every 2 s window.
+            let windowSeconds = now - diagWindowStart
+            if windowSeconds >= 2.0 {
+                let elapsedTotal = now - diagStartTime
+                let scFps = Double(diagSCFramesInWindow) / windowSeconds
+                let completeFps = Double(diagCompleteFramesInWindow) / windowSeconds
+                print(String(format: "📊 [+%.1fs] SCK: %.1f fps delivered, %.1f fps complete (%d idle), PTS gaps>200ms in window: %d",
+                             elapsedTotal, scFps, completeFps, diagIdleFramesInWindow, diagBackToBackGaps200))
+                diagWindowStart = now
+                diagSCFramesInWindow = 0
+                diagCompleteFramesInWindow = 0
+                diagIdleFramesInWindow = 0
+                diagBackToBackGaps200 = 0
+            }
+
             videoWriter.appendVideoBuffer(sampleBuffer)
 
         case .audio:
