@@ -56,7 +56,11 @@ class VideoWriter {
 
         print("🎬 VideoWriter dimensions: \(width)x\(height) -> \(evenWidth)x\(evenHeight)")
 
-        // Video encoding settings with explicit compression properties
+        // Video encoding settings with explicit compression properties.
+        // Tag the output with Display P3 color metadata so players (QuickTime,
+        // Safari, Final Cut, etc.) interpret the wider-gamut pixels we captured
+        // from SCStream correctly. Without this tag, players assume Rec.709 /
+        // sRGB and the recording looks desaturated.
         self.videoSettings = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: evenWidth,
@@ -66,7 +70,12 @@ class VideoWriter {
                 AVVideoMaxKeyFrameIntervalKey: frameRate,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoExpectedSourceFrameRateKey: frameRate,
-            ] as [String: Any]
+            ] as [String: Any],
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_P3_D65,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            ] as [String: String]
         ]
 
         // Audio encoding settings - AAC

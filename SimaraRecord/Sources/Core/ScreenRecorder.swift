@@ -321,6 +321,13 @@ class ScreenRecorder: NSObject, ObservableObject {
         }
         streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(workingSettings.frameRate.rawValue))
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
+        // Capture in Display P3 so the recording preserves the wider gamut
+        // every modern Apple display uses. Without this, SCStream flattens
+        // to sRGB and the resulting recording looks visibly desaturated
+        // when viewed back on the same screen.
+        if #available(macOS 13.0, *) {
+            streamConfig.colorSpaceName = CGColorSpace.displayP3
+        }
         streamConfig.showsCursor = true
         streamConfig.queueDepth = 8  // absorb compositor stalls; default 3 is tight under load
 
@@ -747,6 +754,9 @@ class ScreenRecorder: NSObject, ObservableObject {
         newConfig.sampleRate = base.sampleRate
         newConfig.channelCount = base.channelCount
         newConfig.queueDepth = base.queueDepth
+        if #available(macOS 13.0, *) {
+            newConfig.colorSpaceName = base.colorSpaceName
+        }
         if #available(macOS 14.0, *) { newConfig.scalesToFit = true }
 
         // windowFrameUpdateInFlight was set true by the poll before hopping
