@@ -15,6 +15,7 @@ import VideoToolbox
 /// Available export presets with different quality and file size characteristics.
 enum ExportPreset: String, CaseIterable, Identifiable {
     case original = "Original (No Re-encode)"
+    case proRes422 = "ProRes 422 (Editor Handoff) — Beta"
     case lossless = "Lossless Quality (HEVC, larger files)"
     case highQuality = "High Quality (12 Mbps)"
     case balanced = "Balanced (6 Mbps)"
@@ -28,6 +29,8 @@ enum ExportPreset: String, CaseIterable, Identifiable {
         switch self {
         case .original:
             return "Copies the video without re-encoding. Fastest export, same file size as original."
+        case .proRes422:
+            return "BETA: Apple ProRes 422 in MOV container, designed for handoff to Final Cut Pro, Premiere, or DaVinci Resolve. Currently routed through the standard polish pipeline — the final encode is ProRes but intermediate quality is still being tuned. Very large files (~5 GB per minute at 1080p)."
         case .lossless:
             return "HEVC (H.265) at 30 Mbps. Pristine quality with full chroma — matches the original screen. ~3× larger files than High Quality."
         case .highQuality:
@@ -41,14 +44,25 @@ enum ExportPreset: String, CaseIterable, Identifiable {
         }
     }
 
+    /// True for presets that produce very large output and should show a
+    /// warning before export.
+    var producesLargeFiles: Bool {
+        switch self {
+        case .proRes422: return true
+        default: return false
+        }
+    }
+
     /// Estimated size multiplier relative to original file size.
     /// Values less than 1.0 indicate compression, 1.0 means same size.
     var estimatedSizeMultiplier: Double {
         switch self {
         case .original:
             return 1.0
+        case .proRes422:
+            return 8.0   // ProRes 422 at ~660 Mbps — much larger than the HEVC source
         case .lossless:
-            return 2.5   // HEVC at 30 Mbps — larger than source, this is the price of pristine quality
+            return 2.5
         case .highQuality:
             return 0.7
         case .balanced:
@@ -60,13 +74,16 @@ enum ExportPreset: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Target video bitrate in bits per second.
+    /// Target video bitrate in bits per second. Zero means codec-controlled
+    /// (ProRes uses fixed per-frame allocation, not a bitrate target).
     var targetBitrate: Int {
         switch self {
         case .original:
-            return 0  // Not used
+            return 0  // Not used (no re-encode)
+        case .proRes422:
+            return 0  // ProRes is intra-frame at a fixed quality, AVAssetWriter handles allocation
         case .lossless:
-            return 30_000_000  // 30 Mbps HEVC — visually transparent for screen content
+            return 30_000_000  // 30 Mbps HEVC
         case .highQuality:
             return 12_000_000  // 12 Mbps H.264
         case .balanced:
@@ -78,10 +95,11 @@ enum ExportPreset: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Video codec used for this preset. HEVC for Lossless tier, H.264 for
-    /// everything else (broadest compatibility).
+    /// Video codec used for this preset.
     var codec: AVVideoCodecType {
         switch self {
+        case .proRes422:
+            return .proRes422
         case .lossless:
             return .hevc
         default:
@@ -89,10 +107,31 @@ enum ExportPreset: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Container/file-type used for the output. ProRes is only valid inside a
+    /// .mov container — MP4 doesn't support it. Everything else uses .mp4.
+    var fileType: AVFileType {
+        switch self {
+        case .proRes422:
+            return .mov
+        default:
+            return .mp4
+        }
+    }
+
+    /// File extension that matches the container. Drives the output filename.
+    var fileExtension: String {
+        switch self {
+        case .proRes422:
+            return "mov"
+        default:
+            return "mp4"
+        }
+    }
+
     /// Target resolution height. nil means maintain original.
     var targetHeight: Int? {
         switch self {
-        case .original, .lossless, .highQuality, .balanced, .webOptimized:
+        case .original, .proRes422, .lossless, .highQuality, .balanced, .webOptimized:
             return nil  // Maintain original resolution (capped via maxHeight for some)
         case .smallFile:
             return 720
@@ -100,12 +139,12 @@ enum ExportPreset: String, CaseIterable, Identifiable {
     }
 
     /// Maximum height for presets that maintain original but cap at 1080p.
-    /// Lossless intentionally has no cap so 2x supersampled captures stay full
-    /// native resolution.
+    /// ProRes / Lossless intentionally have no cap so 2x supersampled captures
+    /// stay full native resolution.
     var maxHeight: Int {
         switch self {
-        case .original, .lossless:
-            return Int.max  // No cap
+        case .original, .proRes422, .lossless:
+            return Int.max
         case .highQuality, .balanced, .webOptimized:
             return 1080
         case .smallFile:
@@ -353,7 +392,10 @@ class VideoExporter {
         currentExportSession = exportSession
 
         exportSession.outputURL = outputURL
-        exportSession.outputFileType = .mp4
+        // Passthrough preserves the original codec — match the container to
+        // the output URL's extension so HEVC source.mov → polished.mov and
+        // legacy H.264 sources keep .mp4.
+        exportSession.outputFileType = outputURL.pathExtension.lowercased() == "mov" ? .mov : .mp4
 
         // Start progress monitoring
         let progressTask = Task {
@@ -492,7 +534,7 @@ class VideoExporter {
         // Create asset writer
         let assetWriter: AVAssetWriter
         do {
-            assetWriter = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+            assetWriter = try AVAssetWriter(outputURL: outputURL, fileType: preset.fileType)
         } catch {
             throw VideoExportError.cannotCreateAssetWriter
         }
@@ -501,32 +543,39 @@ class VideoExporter {
         // Configure for web optimization if needed
         assetWriter.shouldOptimizeForNetworkUse = preset.shouldOptimizeForNetworkUse
 
-        // Configure video writer input with target bitrate. HEVC presets (the
-        // Lossless tier) omit AVVideoProfileLevelKey since HEVC profile
-        // selection is automatic via the bitrate target. H.264 presets keep
-        // High Auto Level explicitly to ensure compatibility across players.
-        // Display P3 color metadata is applied to all presets so the wide
-        // gamut captured by SCStream survives the re-encode.
-        var compressionProperties: [String: Any] = [
-            AVVideoAverageBitRateKey: preset.targetBitrate,
-            AVVideoMaxKeyFrameIntervalKey: Int(nominalFrameRate > 0 ? nominalFrameRate : 30),
-            AVVideoExpectedSourceFrameRateKey: Int(nominalFrameRate > 0 ? nominalFrameRate : 30)
-        ]
-        if preset.codec == .h264 {
-            compressionProperties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
-        }
-
-        let videoSettings: [String: Any] = [
+        // Configure video writer input. Codec-specific properties:
+        // - H.264 (compatible delivery): explicit High Auto Level profile,
+        //   bitrate target, GOP length, expected source frame rate.
+        // - HEVC (Lossless): same as H.264 but profile chosen automatically
+        //   by the encoder based on bitrate.
+        // - ProRes 422 (editor handoff): no compression properties at all —
+        //   ProRes is intra-frame (every frame is a keyframe by definition)
+        //   and fixed-quality, so AVAssetWriter rejects MaxKeyFrameInterval,
+        //   bitrate, and profile level for codec type 'apcn'.
+        // Display P3 color metadata applies to every codec so the wide gamut
+        // captured by SCStream survives the re-encode.
+        var videoSettings: [String: Any] = [
             AVVideoCodecKey: preset.codec,
             AVVideoWidthKey: targetWidth,
             AVVideoHeightKey: targetHeight,
-            AVVideoCompressionPropertiesKey: compressionProperties,
             AVVideoColorPropertiesKey: [
                 AVVideoColorPrimariesKey: AVVideoColorPrimaries_P3_D65,
                 AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
                 AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
             ] as [String: String]
         ]
+
+        if preset.codec != .proRes422 {
+            var compressionProperties: [String: Any] = [
+                AVVideoAverageBitRateKey: preset.targetBitrate,
+                AVVideoMaxKeyFrameIntervalKey: Int(nominalFrameRate > 0 ? nominalFrameRate : 30),
+                AVVideoExpectedSourceFrameRateKey: Int(nominalFrameRate > 0 ? nominalFrameRate : 30)
+            ]
+            if preset.codec == .h264 {
+                compressionProperties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+            }
+            videoSettings[AVVideoCompressionPropertiesKey] = compressionProperties
+        }
 
         let videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoWriterInput.expectsMediaDataInRealTime = false
