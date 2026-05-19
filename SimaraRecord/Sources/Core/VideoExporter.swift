@@ -15,8 +15,9 @@ import VideoToolbox
 /// Available export presets with different quality and file size characteristics.
 enum ExportPreset: String, CaseIterable, Identifiable {
     case original = "Original (No Re-encode)"
-    case highQuality = "High Quality (8 Mbps)"
-    case balanced = "Balanced (4 Mbps)"
+    case lossless = "Lossless Quality (HEVC, larger files)"
+    case highQuality = "High Quality (12 Mbps)"
+    case balanced = "Balanced (6 Mbps)"
     case smallFile = "Small File (720p, 2 Mbps)"
     case webOptimized = "Web Optimized (Fast Start)"
 
@@ -27,14 +28,16 @@ enum ExportPreset: String, CaseIterable, Identifiable {
         switch self {
         case .original:
             return "Copies the video without re-encoding. Fastest export, same file size as original."
+        case .lossless:
+            return "HEVC (H.265) at 30 Mbps. Pristine quality with full chroma — matches the original screen. ~3× larger files than High Quality."
         case .highQuality:
-            return "Re-encodes at 1080p with 8 Mbps bitrate. High quality, moderate compression."
+            return "H.264 at 12 Mbps. Sharp recordings suitable for sharing and uploading."
         case .balanced:
-            return "Re-encodes at 1080p with 4 Mbps bitrate. Good quality with smaller file size."
+            return "H.264 at 6 Mbps. Good quality with smaller file size."
         case .smallFile:
-            return "Scales down to 720p with 2 Mbps bitrate. Smaller files for easy sharing."
+            return "Scales down to 720p with 2 Mbps. Smaller files for easy sharing."
         case .webOptimized:
-            return "Re-encodes at 1080p with 4 Mbps and fast-start enabled. Ideal for web streaming."
+            return "H.264 at 6 Mbps with fast-start enabled. Ideal for web streaming."
         }
     }
 
@@ -44,8 +47,10 @@ enum ExportPreset: String, CaseIterable, Identifiable {
         switch self {
         case .original:
             return 1.0
+        case .lossless:
+            return 2.5   // HEVC at 30 Mbps — larger than source, this is the price of pristine quality
         case .highQuality:
-            return 0.7  // Typically smaller than original due to more efficient encoding
+            return 0.7
         case .balanced:
             return 0.4
         case .smallFile:
@@ -60,31 +65,46 @@ enum ExportPreset: String, CaseIterable, Identifiable {
         switch self {
         case .original:
             return 0  // Not used
+        case .lossless:
+            return 30_000_000  // 30 Mbps HEVC — visually transparent for screen content
         case .highQuality:
-            return 8_000_000  // 8 Mbps
+            return 12_000_000  // 12 Mbps H.264
         case .balanced:
-            return 4_000_000  // 4 Mbps
+            return 6_000_000   // 6 Mbps H.264
         case .smallFile:
-            return 2_000_000  // 2 Mbps
+            return 2_000_000   // 2 Mbps H.264
         case .webOptimized:
-            return 4_000_000  // 4 Mbps
+            return 6_000_000   // 6 Mbps H.264
+        }
+    }
+
+    /// Video codec used for this preset. HEVC for Lossless tier, H.264 for
+    /// everything else (broadest compatibility).
+    var codec: AVVideoCodecType {
+        switch self {
+        case .lossless:
+            return .hevc
+        default:
+            return .h264
         }
     }
 
     /// Target resolution height. nil means maintain original.
     var targetHeight: Int? {
         switch self {
-        case .original, .highQuality, .balanced, .webOptimized:
-            return nil  // Maintain original resolution (capped at 1080p for non-original)
+        case .original, .lossless, .highQuality, .balanced, .webOptimized:
+            return nil  // Maintain original resolution (capped via maxHeight for some)
         case .smallFile:
             return 720
         }
     }
 
     /// Maximum height for presets that maintain original but cap at 1080p.
+    /// Lossless intentionally has no cap so 2x supersampled captures stay full
+    /// native resolution.
     var maxHeight: Int {
         switch self {
-        case .original:
+        case .original, .lossless:
             return Int.max  // No cap
         case .highQuality, .balanced, .webOptimized:
             return 1080
@@ -481,17 +501,31 @@ class VideoExporter {
         // Configure for web optimization if needed
         assetWriter.shouldOptimizeForNetworkUse = preset.shouldOptimizeForNetworkUse
 
-        // Configure video writer input with target bitrate
+        // Configure video writer input with target bitrate. HEVC presets (the
+        // Lossless tier) omit AVVideoProfileLevelKey since HEVC profile
+        // selection is automatic via the bitrate target. H.264 presets keep
+        // High Auto Level explicitly to ensure compatibility across players.
+        // Display P3 color metadata is applied to all presets so the wide
+        // gamut captured by SCStream survives the re-encode.
+        var compressionProperties: [String: Any] = [
+            AVVideoAverageBitRateKey: preset.targetBitrate,
+            AVVideoMaxKeyFrameIntervalKey: Int(nominalFrameRate > 0 ? nominalFrameRate : 30),
+            AVVideoExpectedSourceFrameRateKey: Int(nominalFrameRate > 0 ? nominalFrameRate : 30)
+        ]
+        if preset.codec == .h264 {
+            compressionProperties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+        }
+
         let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: preset.codec,
             AVVideoWidthKey: targetWidth,
             AVVideoHeightKey: targetHeight,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: preset.targetBitrate,
-                AVVideoMaxKeyFrameIntervalKey: Int(nominalFrameRate > 0 ? nominalFrameRate : 30),
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoExpectedSourceFrameRateKey: Int(nominalFrameRate > 0 ? nominalFrameRate : 30)
-            ] as [String: Any]
+            AVVideoCompressionPropertiesKey: compressionProperties,
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_P3_D65,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            ] as [String: String]
         ]
 
         let videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)

@@ -56,19 +56,26 @@ class VideoWriter {
 
         print("🎬 VideoWriter dimensions: \(width)x\(height) -> \(evenWidth)x\(evenHeight)")
 
-        // Video encoding settings with explicit compression properties.
-        // Tag the output with Display P3 color metadata so players (QuickTime,
-        // Safari, Final Cut, etc.) interpret the wider-gamut pixels we captured
-        // from SCStream correctly. Without this tag, players assume Rec.709 /
-        // sRGB and the recording looks desaturated.
+        // Source recording uses HEVC (H.265) so the working file the polish
+        // step reads from preserves maximum quality. HEVC at the same bitrate
+        // as H.264 produces ~30–40% better quality for screen content (sharper
+        // text, less chroma blur on colored UI). Apple Silicon has hardware
+        // HEVC encoders so there's no CPU cost.
+        //
+        // Source bitrate is set generously — this is a temporary working file
+        // the user never publishes directly; only the polish step's chosen
+        // export preset determines final delivered file size. Quality lost here
+        // can't be recovered in polish, so we don't skimp.
+        //
+        // Display P3 color tagging stays the same so the wider gamut we
+        // captured survives to the final output.
         self.videoSettings = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: AVVideoCodecType.hevc,
             AVVideoWidthKey: evenWidth,
             AVVideoHeightKey: evenHeight,
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: bitrate,
                 AVVideoMaxKeyFrameIntervalKey: frameRate,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoExpectedSourceFrameRateKey: frameRate,
             ] as [String: Any],
             AVVideoColorPropertiesKey: [

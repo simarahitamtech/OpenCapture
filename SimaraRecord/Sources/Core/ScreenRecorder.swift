@@ -283,15 +283,18 @@ class ScreenRecorder: NSObject, ObservableObject {
             // Clamp to screen bounds (points)
             let clampedPoints = rectPoints.intersection(screenFramePoints)
 
-            // Convert to pixels, coerce to even dimensions
-            let pixelWidth = max(2, Int((clampedPoints.width * backingScale).rounded(.down)))
-            let pixelHeight = max(2, Int((clampedPoints.height * backingScale).rounded(.down)))
+            // Capture at >= 2x density so scaled "Looks like" modes (where
+            // backingScale is reported as 1.0 despite the underlying display
+            // being Retina) still produce crisp recordings.
+            let captureScale = max(backingScale, 2.0)
+            let pixelWidth = max(2, Int((clampedPoints.width * captureScale).rounded(.down)))
+            let pixelHeight = max(2, Int((clampedPoints.height * captureScale).rounded(.down)))
             let evenPixelWidth = (pixelWidth / 2) * 2
             let evenPixelHeight = (pixelHeight / 2) * 2
 
             // Convert back to points so sourceRect matches pixel size
-            let evenWidthPoints = CGFloat(evenPixelWidth) / backingScale
-            let evenHeightPoints = CGFloat(evenPixelHeight) / backingScale
+            let evenWidthPoints = CGFloat(evenPixelWidth) / captureScale
+            let evenHeightPoints = CGFloat(evenPixelHeight) / captureScale
 
             let evenRectPoints = CGRect(
                 x: clampedPoints.minX.rounded(.down),
@@ -304,20 +307,33 @@ class ScreenRecorder: NSObject, ObservableObject {
             streamConfig.width = evenPixelWidth
             streamConfig.height = evenPixelHeight
             print("🎯 Normalized capture rect (points): \(evenRectPoints)")
-            print("🎯 Capture size (pixels): \(evenPixelWidth)x\(evenPixelHeight), scale: \(backingScale)")
+            print("🎯 Region capture size (pixels): \(evenPixelWidth)x\(evenPixelHeight), display scale: \(backingScale), capture scale: \(captureScale)")
         } else {
-            // Full display - use display's pixel size (already in pixels)
-            let evenWidth = (Int(display.width) / 2) * 2
-            let evenHeight = (Int(display.height) / 2) * 2
+            // Full display capture. SCDisplay.width/height are in POINTS, not
+            // pixels (the previous code mis-stated this and recorded at half
+            // resolution on scaled "Looks like" display modes — e.g. a Retina
+            // Macbook in "More Space" reports SCDisplay 1440x932 points with
+            // backingScale 1.0, while the display actually has 2880x1864
+            // pixels). Multiply by max(backingScale, 2.0) so we always capture
+            // at >= 2x density of the logical display.
+            let captureScale = max(backingScale, 2.0)
+            let pxW = Int((CGFloat(display.width) * captureScale).rounded(.down))
+            let pxH = Int((CGFloat(display.height) * captureScale).rounded(.down))
+            let evenWidth = (pxW / 2) * 2
+            let evenHeight = (pxH / 2) * 2
             streamConfig.width = evenWidth
             streamConfig.height = evenHeight
 
-            if evenWidth != display.width || evenHeight != display.height {
-                let evenRect = CGRect(x: 0, y: 0, width: CGFloat(evenWidth) / backingScale, height: CGFloat(evenHeight) / backingScale)
+            // sourceRect is in points (the full display, possibly trimmed for
+            // even dimensions). Pixel buffer is captureScale × that.
+            let evenWidthPts = CGFloat(evenWidth) / captureScale
+            let evenHeightPts = CGFloat(evenHeight) / captureScale
+            if abs(evenWidthPts - CGFloat(display.width)) > 0.5 || abs(evenHeightPts - CGFloat(display.height)) > 0.5 {
+                let evenRect = CGRect(x: 0, y: 0, width: evenWidthPts, height: evenHeightPts)
                 streamConfig.sourceRect = evenRect
                 print("🎯 Adjusted full-screen capture rect to even size (points): \(evenRect)")
             }
-            print("🎯 Full-screen capture size (pixels): \(evenWidth)x\(evenHeight), scale: \(backingScale)")
+            print("🎯 Full-screen capture size (pixels): \(evenWidth)x\(evenHeight), display scale: \(backingScale), capture scale: \(captureScale)")
         }
         streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(workingSettings.frameRate.rawValue))
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
