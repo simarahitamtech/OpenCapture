@@ -41,7 +41,7 @@
     <string>SimaRecord Pro needs microphone access to record audio with your screen recordings.</string>
 
     <key>NSCameraUsageDescription</key>
-    <string>SimaRecord Pro needs camera access for the webcam overlay during recordings, and to capture the screen of a USB-connected iPhone or iPad.</string>
+    <string>SimaRecord Pro needs camera access for the webcam overlay during recordings.</string>
 
     <key>NSSystemExtensionUsageDescription</key>
     <string>Required for capturing system audio along with your screen recording.</string>
