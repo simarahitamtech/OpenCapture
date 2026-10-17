@@ -19,6 +19,12 @@ struct RecordingSettings {
     var teleprompterSettings: TeleprompterSettings
     var outputURL: URL
     var excludedWindowIDs: [CGWindowID] = []
+    /// When true (default), ScreenCaptureKit bakes the system cursor into
+    /// the captured frames. When false, the Pro layer is responsible for
+    /// rendering its own cursor at polish time using the metadata-recorded
+    /// positions + types. Set false by the Pro layer when the user has
+    /// opted into BrandingConfig.renderCustomCursor.
+    var showsSystemCursor: Bool = true
 
     static var `default`: RecordingSettings {
         let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!

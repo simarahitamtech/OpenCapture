@@ -229,6 +229,11 @@ class ScreenRecorder: NSObject, ObservableObject {
         // Configure stream
         let streamConfig = SCStreamConfiguration()
 
+        // Cursor visibility — when the Pro layer is rendering its own
+        // cursor at polish time, we tell SCK to suppress the system cursor
+        // here so the recording doesn't end up with two cursors stacked.
+        streamConfig.showsCursor = workingSettings.showsSystemCursor
+
         // Determine recording dimensions and ensure they are valid for H.264 (even sizes).
         // Important: sourceRect is in points, width/height are in pixels.
         let backingScale = backingScaleFactor(for: display)
